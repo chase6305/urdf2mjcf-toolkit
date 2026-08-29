@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional, Union
 
@@ -13,6 +14,7 @@ from tqdm import tqdm
 from urdf2mjcf.dae_to_obj_converter import DAE2OBJConverter
 from urdf2mjcf.glb_to_obj_converter import GLB2OBJConverter
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
 from urdf2mjcf.mjcf_editor import MJCFEditor
 from urdf2mjcf.obj_to_mjcf_converter import OBJ2MJCFImporter
 from urdf2mjcf.urdf_inertia_calculator import URDFInertiaCalculator
@@ -35,6 +37,11 @@ class MujocoConversionManager:
         self.fixed_base = fixed_base
         self.export_collision = export_collision
         self.auto_recalculate_inertia = auto_recalculate_inertia
+
+        if not self.urdf_path.is_file():
+            raise FileNotFoundError(f"URDF file does not exist: {self.urdf_path}")
+        if self.urdf_path.suffix.lower() != ".urdf":
+            raise ValueError(f"Expected a .urdf input file: {self.urdf_path}")
 
         if output_dir is None:
             parent = self.urdf_path.parent
@@ -101,17 +108,29 @@ class MujocoConversionManager:
         self.logger.warning(
             "URDF conversion failed. Recalculating inertia and retrying."
         )
-        inertia_calculator = URDFInertiaCalculator(self.urdf_path)
-        if not inertia_calculator.update_inertia():
-            self.logger.error("Inertia recalculation failed. Aborting.")
-            return False
+        original_converter_path = urdf_converter.urdf_path
+        with tempfile.TemporaryDirectory(
+            prefix="urdf2mjcf-recovery-", dir=self.output_dir
+        ) as recovery_dir:
+            recovery_urdf = Path(recovery_dir) / self.urdf_path.name
+            shutil.copy2(self.urdf_path, recovery_urdf)
+            inertia_calculator = URDFInertiaCalculator(
+                recovery_urdf, mesh_search_dir=self.urdf_path.parent
+            )
+            if not inertia_calculator.update_inertia():
+                self.logger.error("Inertia recalculation failed. Aborting.")
+                return False
 
-        self.logger.info(
-            "Inertia recalculation complete. Retrying URDF to MJCF conversion."
-        )
-        if not urdf_converter.convert():
-            self.logger.error("URDF conversion failed again after retry.")
-            return False
+            self.logger.info(
+                "Inertia recalculation complete. Retrying URDF to MJCF conversion."
+            )
+            try:
+                urdf_converter.urdf_path = recovery_urdf
+                if not urdf_converter.convert():
+                    self.logger.error("URDF conversion failed again after retry.")
+                    return False
+            finally:
+                urdf_converter.urdf_path = original_converter_path
 
         output_xml = urdf_converter.get_output_xml()
         if not (output_xml and Path(output_xml).exists()):
@@ -146,6 +165,22 @@ class MujocoConversionManager:
             self.visual_output_dir,
             recursive=True,
         )
+        mesh_converter = MeshToOBJConverter()
+        mesh_results = mesh_converter.convert_directory(
+            self.visual_output_dir, recursive=True
+        )
+        if self.export_collision:
+            mesh_results.update(
+                mesh_converter.convert_directory(
+                    self.collision_output_dir, recursive=True
+                )
+            )
+        failed_meshes = [
+            source for source, output in mesh_results.items() if output is None
+        ]
+        if failed_meshes:
+            failed_list = ", ".join(str(path) for path in failed_meshes)
+            raise RuntimeError(f"Mesh conversion failed for: {failed_list}")
         self.logger.info("Mesh format conversion complete.")
 
         urdf_converter = URDF2MJCFConverter(

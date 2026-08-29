@@ -1,10 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urdf2mjcf-toolkit"
+version = "0.1.0"
+description = "Convert URDF models and mesh assets into MuJoCo-ready MJCF projects."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "URDF2MJCF Toolkit contributors" }]
+dependencies = [
+  "numpy",
+  "obj2mjcf==0.0.25",
+  "pillow",
+  "pycollada==0.9.2",
+  "tqdm",
+  "trimesh[easy]",
+  "urdf2mjcf==0.2.39",
+]
+
+[project.optional-dependencies]
+visualization = ["mujoco==3.8.0"]
+dev = ["black>=24", "pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+urdf2mjcf-toolkit = "urdf2mjcf.urdf_to_mujoco_converter:main"
+urdf-inertia = "urdf2mjcf.urdf_inertia_calculator:main"
+dae-to-obj = "urdf2mjcf.dae_to_obj_converter:main"
+glb-to-obj = "urdf2mjcf.glb_to_obj_converter:main"
+obj-to-mjcf = "urdf2mjcf.obj_to_mjcf_converter:main"
+mesh-to-obj = "urdf2mjcf.mesh_to_obj_converter:main"
+
+[project.urls]
+Repository = "https://github.com/chase6305/urdf2mjcf-toolkit"
+
+[tool.setuptools.packages.find]
+include = ["urdf2mjcf*"]
+
 [tool.black]
 line-length = 88
-target-version = ["py311"]
+target-version = ["py310"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -16,3 +56,4 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = "--strict-markers --strict-config"

@@ -3,17 +3,12 @@ URDF Inertia Calculator Module
 Calculate inertia properties in URDF using Trimesh library
 """
 
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
-import shutil
-from typing import Optional, Dict, Any, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-try:
-    import numpy as np
-except ImportError:
-    print("Error: numpy library not installed")
-    print("Install command: pip install numpy")
-    exit(1)
+import numpy as np
 
 try:
     import trimesh
@@ -21,8 +16,6 @@ try:
     TRIMESH_AVAILABLE = True
 except ImportError:
     TRIMESH_AVAILABLE = False
-    print("Warning: trimesh library not installed, will use existing fix logic")
-    print("Install command: pip install trimesh[easy]")
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 
@@ -39,6 +32,7 @@ class URDFInertiaCalculator:
         regularize_rel_tol: float = 1e-6,
         regularize_abs_tol: float = 1e-8,
         enforce_min_eig: Optional[float] = None,
+        mesh_search_dir: Optional[Path] = None,
     ):
         """
         Initialize calculator
@@ -50,7 +44,7 @@ class URDFInertiaCalculator:
             scale: Mesh scaling factor
         """
         self.urdf_path = Path(urdf_path)
-        self.urdf_dir = self.urdf_path.parent
+        self.urdf_dir = Path(mesh_search_dir) if mesh_search_dir else self.urdf_path.parent
         self.geometry_preference = geometry_preference
         self.density = density
         self.scale = scale
@@ -268,44 +262,39 @@ class URDFInertiaCalculator:
         Returns:
             Path: Mesh file path, or None if not found
         """
-        geometry_elements = []
+        geometry_elements: list[tuple[ET.Element, Optional[ET.Element]]] = []
+
+        def append_geometry(parent: ET.Element) -> None:
+            geometry = parent.find("geometry")
+            if geometry is not None:
+                geometry_elements.append((geometry, parent.find("origin")))
 
         # Find geometry elements based on preference
         if self.geometry_preference == "collision":
             # Prefer collision geometry
             for collision in link_element.findall("collision"):
-                geometry = collision.find("geometry")
-                if geometry is not None:
-                    geometry_elements.append(geometry)
+                append_geometry(collision)
 
             # Fallback to visual geometry if no collision found
             if not geometry_elements:
                 for visual in link_element.findall("visual"):
-                    geometry = visual.find("geometry")
-                    if geometry is not None:
-                        geometry_elements.append(geometry)
+                    append_geometry(visual)
 
         elif self.geometry_preference == "visual":
             # Prefer visual geometry
             for visual in link_element.findall("visual"):
-                geometry = visual.find("geometry")
-                if geometry is not None:
-                    geometry_elements.append(geometry)
+                append_geometry(visual)
 
             # Fallback to collision geometry if no visual found
             if not geometry_elements:
                 for collision in link_element.findall("collision"):
-                    geometry = collision.find("geometry")
-                    if geometry is not None:
-                        geometry_elements.append(geometry)
+                    append_geometry(collision)
 
         # Extract mesh file path and origin
-        for geometry in geometry_elements:
+        for geometry, origin in geometry_elements:
             mesh = geometry.find("mesh")
             if mesh is not None:
                 filename = mesh.get("filename")
-                # geometry origin (optional)
-                origin = geometry.find("origin")
                 origin_xyz = None
                 if origin is not None:
                     xyz = origin.get("xyz")
@@ -318,29 +307,32 @@ class URDFInertiaCalculator:
                             origin_xyz = None
 
                 if filename:
-                    # Build full path
-                    mesh_path = self.urdf_dir / filename
+                    normalized_filename = filename.replace("\\", "/")
+                    if normalized_filename.startswith("file://"):
+                        normalized_filename = normalized_filename.removeprefix("file://")
+
+                    mesh_path = Path(normalized_filename)
+                    if not mesh_path.is_absolute():
+                        mesh_path = self.urdf_dir / mesh_path
                     if mesh_path.exists():
                         self.logger.debug(f"Found mesh file: {mesh_path}")
                         return mesh_path, origin_xyz
                     else:
-                        # Try to find in subdirectories
-                        for subdir in self.urdf_dir.rglob("*"):
-                            if subdir.is_dir():
-                                potential_path = subdir / Path(filename).name
-                                if potential_path.exists():
-                                    self.logger.info(
-                                        f"Found mesh file in subdirectory: {subdir}"
-                                    )
-                                    return potential_path, origin_xyz
-
-                        # Try to find with relative path
-                        mesh_path_relative = self.urdf_dir / Path(filename)
-                        if mesh_path_relative.exists():
-                            self.logger.debug(
-                                f"Found mesh file with relative path: {mesh_path_relative}"
+                        matches = sorted(
+                            path
+                            for path in self.urdf_dir.rglob(Path(filename).name)
+                            if path.is_file()
+                        )
+                        if len(matches) == 1:
+                            self.logger.info(
+                                f"Found mesh file in subdirectory: {matches[0]}"
                             )
-                            return mesh_path_relative, origin_xyz
+                            return matches[0], origin_xyz
+                        if len(matches) > 1:
+                            self.logger.warning(
+                                f"Multiple mesh files match {filename}; using {matches[0]}"
+                            )
+                            return matches[0], origin_xyz
 
                         self.logger.warning(f"Mesh file not found: {mesh_path}")
 
@@ -375,7 +367,7 @@ class URDFInertiaCalculator:
         failed_links = []
 
         for link in root.findall(".//link"):
-            link_name = link.get("name")
+            link_name = link.get("name", "unknown")
             total_links += 1
 
             # Skip certain links (optional)

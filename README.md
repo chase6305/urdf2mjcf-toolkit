@@ -1,6 +1,10 @@
 # URDF2MJCF Toolkit
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 URDF2MJCF Toolkit is an automated Python toolchain for converting robot URDF models and their mesh assets into MuJoCo-ready MJCF projects.
+
+![URDF2MJCF conversion pipeline](docs/assets/urdf2mjcf-pipeline.png)
 
 ## Description
 
@@ -11,6 +15,7 @@ A Python toolkit for converting URDF robot models and mesh assets into MuJoCo-re
 - Converts URDF models to MJCF with a single pipeline command.
 - Copies and normalizes visual and optional collision assets.
 - Converts DAE and GLB meshes to OBJ for MuJoCo-friendly asset loading.
+- Converts STL, PLY, OFF, and 3MF meshes to OBJ with `trimesh`.
 - Generates OBJ-derived MJCF snippets with `obj2mjcf`.
 - Repairs problematic inertia values by recalculating them from mesh geometry when conversion fails.
 - Post-processes MJCF files to normalize mesh paths, textures, materials, default geom classes, ground plane, and fixed/floating base behavior.
@@ -18,7 +23,7 @@ A Python toolkit for converting URDF robot models and mesh assets into MuJoCo-re
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.10+
 - Blender available on `PATH` for DAE conversion
 - `obj2mjcf` and `urdf2mjcf` command-line tools from the Python dependencies
 - MuJoCo Python bindings for validation or visualization
@@ -26,7 +31,14 @@ A Python toolkit for converting URDF robot models and mesh assets into MuJoCo-re
 Install Python dependencies:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install .
+```
+
+Install the optional MuJoCo viewer and development tools when needed:
+
+```bash
+python -m pip install '.[visualization]'
+python -m pip install '.[dev]'
 ```
 
 Install Blender on Ubuntu:
@@ -62,6 +74,12 @@ Enable debug logging:
 python -m urdf2mjcf.urdf_to_mujoco_converter robot.urdf ./output --verbose
 ```
 
+After installation, the shorter command is equivalent:
+
+```bash
+urdf2mjcf-toolkit robot.urdf ./output --verbose
+```
+
 ## Main CLI
 
 ```bash
@@ -92,6 +110,12 @@ Convert GLB files to OBJ and extract textures:
 
 ```bash
 python -m urdf2mjcf.glb_to_obj_converter ./meshes/visual -o ./converted_visual
+```
+
+Convert STL, PLY, OFF, or 3MF files to OBJ:
+
+```bash
+mesh-to-obj ./meshes --overwrite
 ```
 
 Generate MJCF snippets for OBJ asset folders:
@@ -151,7 +175,7 @@ output_dir/
 ## Troubleshooting
 
 - `Blender executable not found`: install Blender and confirm `blender --version` works, or pass `--blender-path` to the DAE converter.
-- `obj2mjcf executable not found`: reinstall dependencies with `python -m pip install -r requirements.txt` and confirm `obj2mjcf` is on `PATH`.
+- `obj2mjcf executable not found`: reinstall the package with `python -m pip install .` and confirm `obj2mjcf` is on `PATH`.
 - Missing meshes or textures: check that the original URDF mesh paths point to existing visual/collision asset folders.
 - Invalid inertia values: run `python kit/urdf_inertia_validator.py robot.urdf`, then retry conversion with inertia recalculation enabled.
 - Model fails to load in MuJoCo: run `python kit/visualize_mujoco.py output/robot.xml --validate-only` for a focused validation pass.
@@ -164,7 +188,7 @@ Recommended local checks:
 
 ```bash
 python -m compileall urdf2mjcf kit
-python -m pip install black ruff
+python -m pytest
 ruff check .
 black --check .
 ```

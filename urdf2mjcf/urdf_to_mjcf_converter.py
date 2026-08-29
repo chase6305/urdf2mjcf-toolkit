@@ -61,6 +61,8 @@ class URDF2MJCFConverter(URDFConverterBase):
         """Convert URDF to MJCF using urdf2mjcf"""
         try:
             self.logger.info("Converting URDF to MJCF using urdf2mjcf...")
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.assets_dir.mkdir(parents=True, exist_ok=True)
 
             # Build output file path
             candidate = self.output_dir / f"{self.urdf_path.stem}.xml"
@@ -68,6 +70,11 @@ class URDF2MJCFConverter(URDFConverterBase):
             if candidate.exists() and candidate.is_dir():
                 candidate = self.output_dir / f"{self.urdf_path.stem}_mjcf.xml"
             self.output_xml = candidate
+            previous_outputs = {
+                path: (path.stat().st_mtime_ns, path.stat().st_size)
+                for path in self.output_dir.glob("*.xml")
+                if path.is_file()
+            }
 
             # Ensure URDF mesh paths resolve even if urdf2mjcf compiles a temp URDF in another directory.
             # MuJoCo resolves relative mesh paths against the URDF location. urdf2mjcf internally writes
@@ -97,6 +104,9 @@ class URDF2MJCFConverter(URDFConverterBase):
 
                 candidate = (self.assets_dir / rel).resolve()
                 if candidate.exists():
+                    converted_obj = candidate.with_suffix(".obj")
+                    if candidate.suffix.lower() != ".obj" and converted_obj.exists():
+                        return converted_obj.as_posix()
                     return candidate.as_posix()
 
                 # fallback: search by basename under assets_dir
@@ -162,7 +172,15 @@ class URDF2MJCFConverter(URDFConverterBase):
             )
 
             if result.returncode == 0:
+                output_changed = False
                 if self.output_xml and self.output_xml.exists():
+                    signature = (
+                        self.output_xml.stat().st_mtime_ns,
+                        self.output_xml.stat().st_size,
+                    )
+                    output_changed = previous_outputs.get(self.output_xml) != signature
+
+                if self.output_xml and output_changed:
                     self.logger.info(
                         f"✓ urdf2mjcf conversion successful: {self.output_xml}"
                     )
@@ -172,7 +190,10 @@ class URDF2MJCFConverter(URDFConverterBase):
                 xml_candidates = [
                     p
                     for p in self.output_dir.glob("*.xml")
-                    if p.is_file() and p.name != self.urdf_path.name
+                    if p.is_file()
+                    and p.name != self.urdf_path.name
+                    and previous_outputs.get(p)
+                    != (p.stat().st_mtime_ns, p.stat().st_size)
                 ]
                 if xml_candidates:
                     xml_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)

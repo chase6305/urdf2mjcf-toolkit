@@ -1,7 +1,7 @@
-import os
 import subprocess
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 
@@ -20,16 +20,14 @@ class OBJ2MJCFImporter:
         if not self.root_dir.exists():
             raise FileNotFoundError(f"Root directory does not exist: {root_dir}")
 
-    def get_obj_variant_map(self) -> dict:
+    def get_obj_variant_map(self) -> dict[str, list[str]]:
         """
         Returns {mesh name: [all obj paths]}, collecting all meshes, regardless of whether there are variants.
         For example: {'base_link': ['chassis/base_link/base_link.obj'], 'head2': ['head/head2/head2_0.obj', ...]}
         """
-        from collections import defaultdict
-
-        mapping = defaultdict(list)
+        mapping: defaultdict[str, list[str]] = defaultdict(list)
         visual_dir = self.root_dir
-        for obj_file in visual_dir.rglob("*.obj"):
+        for obj_file in sorted(visual_dir.rglob("*.obj")):
             stem = obj_file.stem
             # Variant names like foo_0, foo_1, main name is foo
             if "_" in stem and stem.split("_")[-1].isdigit():
@@ -38,18 +36,18 @@ class OBJ2MJCFImporter:
                 mesh_name = stem
             rel_path = obj_file.relative_to(visual_dir).as_posix()
             mapping[mesh_name].append(rel_path)
-        return dict(mapping)
+        return {name: paths for name, paths in sorted(mapping.items())}
 
     def _has_obj_files(self, dir_path: Path) -> bool:
         """Check if the directory contains any .obj files."""
         try:
-            for f in dir_path.iterdir():
-                if f.is_file() and f.suffix.lower() == ".obj":
-                    return True
-        except Exception as e:
-            self.logger.warning(f"Error reading directory {dir_path}: {e}")
+            return any(
+                path.is_file() and path.suffix.lower() == ".obj"
+                for path in dir_path.iterdir()
+            )
+        except OSError as exc:
+            self.logger.warning(f"Error reading directory {dir_path}: {exc}")
             return False
-        return False
 
     def handle_dir(self, d: Path, obj2mjcf_path: str = "obj2mjcf") -> bool:
         """
@@ -83,7 +81,7 @@ class OBJ2MJCFImporter:
         only_subdir: Optional[str] = None,
         recursive: bool = False,
         obj2mjcf_path: str = "obj2mjcf",
-    ) -> List[Path]:
+    ) -> list[Path]:
         """
         Run obj2mjcf in subdirectories containing .obj files. Returns a list of successfully processed directories.
 
@@ -92,7 +90,7 @@ class OBJ2MJCFImporter:
             recursive: If True, recursively scan all subdirectories; otherwise, only scan direct subdirectories.
             obj2mjcf_path: Path to the obj2mjcf executable (default: 'obj2mjcf').
         """
-        processed: List[Path] = []
+        processed: list[Path] = []
         scan_root = self.root_dir
         if only_subdir:
             candidate = self.root_dir / only_subdir
@@ -104,25 +102,23 @@ class OBJ2MJCFImporter:
                 )
                 return processed
 
-        def process_dir(d: Path):
-            if self.handle_dir(d, obj2mjcf_path):
-                processed.append(d)
+        def process_dir(directory: Path) -> None:
+            if self.handle_dir(directory, obj2mjcf_path):
+                processed.append(directory)
 
         if recursive:
-            for root, dirs, files in os.walk(scan_root):
-                dpath = Path(root)
-                if any(f.lower().endswith(".obj") for f in files):
-                    try:
-                        process_dir(dpath)
-                    except Exception as e:
-                        self.logger.error(f"Error processing {dpath}: {e}")
+            directories = [
+                scan_root,
+                *(path for path in scan_root.rglob("*") if path.is_dir()),
+            ]
         else:
-            for name in os.listdir(scan_root):
-                subdir = scan_root / name
-                try:
-                    process_dir(subdir)
-                except Exception as e:
-                    self.logger.error(f"Error processing {subdir}: {e}")
+            directories = [
+                scan_root,
+                *(path for path in scan_root.iterdir() if path.is_dir()),
+            ]
+
+        for directory in sorted(directories):
+            process_dir(directory)
         self.logger.info(f"Total processed directories: {len(processed)}")
         return processed
 
