@@ -4,16 +4,18 @@ Blender DAE to OBJ Conversion Module
 Batch conversion of DAE to OBJ format using Blender, with support for complex scenes and multi-material handling
 """
 
-import os
-import sys
-import subprocess
-import tempfile
-import shutil
 import argparse
+import contextlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
+from typing import Any
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
 
 
 class DAE2OBJConverter:
@@ -29,6 +31,25 @@ class DAE2OBJConverter:
         self.blender_executable = blender_executable
         self.logger = URDF2MJCFLogger.get_logger("DAE2OBJConverter")
         self._blender_checked = False
+
+    def _convert_with_trimesh(
+        self, dae_file: Path, output_dir: Path, preserve_textures: bool
+    ) -> tuple[bool, list[Path]]:
+        """Fallback for Blender installations without the Collada importer."""
+        import trimesh
+
+        try:
+            mesh = MeshToOBJConverter._as_single_mesh(
+                trimesh.load(dae_file, process=False)
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output = output_dir / f"{dae_file.stem}.obj"
+            mesh.export(output, file_type="obj", include_texture=preserve_textures)
+            self.logger.info("Converted %s with the trimesh Collada backend", dae_file)
+            return True, [output]
+        except Exception as exc:
+            self.logger.error("Collada fallback failed for %s: %s", dae_file, exc)
+            return False, []
 
     def check_blender_available(self) -> bool:
         """Check if Blender is available"""
@@ -50,17 +71,17 @@ class DAE2OBJConverter:
             else:
                 raise RuntimeError(f"Blender check failed: {result.stderr}")
 
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
             raise RuntimeError(
                 f"Blender executable not found: {self.blender_executable}\n"
                 "Please ensure Blender is installed and in PATH, or specify via --blender-path"
-            )
+            ) from exc
         except Exception as e:
-            raise RuntimeError(f"Error checking Blender: {e}")
+            raise RuntimeError(f"Error checking Blender: {e}") from e
 
     def convert_single_dae(
         self, dae_file: Path, output_dir: Path, preserve_textures: bool = True
-    ) -> Tuple[bool, List[Path]]:
+    ) -> tuple[bool, list[Path]]:
         """
         Convert single DAE file
 
@@ -99,11 +120,13 @@ class DAE2OBJConverter:
             else:
                 self.logger.warning(f"✗ Conversion failed: {dae_file.name}")
 
-            return success, output_files
+            if success:
+                return success, output_files
+            return self._convert_with_trimesh(dae_file, output_dir, preserve_textures)
 
         except Exception as e:
-            self.logger.error(f"Error converting single DAE file {dae_file}: {e}")
-            return False, []
+            self.logger.warning(f"Blender conversion failed for {dae_file}: {e}")
+            return self._convert_with_trimesh(dae_file, output_dir, preserve_textures)
 
     def convert_directory(
         self,
@@ -111,7 +134,7 @@ class DAE2OBJConverter:
         output_dir: Path,
         recursive: bool = True,
         preserve_textures: bool = True,
-    ) -> Dict[str, Tuple[bool, List[Path]]]:
+    ) -> dict[str, tuple[bool, list[Path]]]:
         """
         Batch convert all DAE files in directory
 
@@ -125,15 +148,17 @@ class DAE2OBJConverter:
             Dictionary: {dae file path: (success status, list of generated OBJ files)}
         """
         results = {}
+        dae_files = []
 
         try:
             # Collect all DAE files
             dae_files = self._collect_dae_files(input_dir, recursive)
 
             if not dae_files:
-                self.logger.warning(f"No DAE files found in directory: {input_dir}")
+                self.logger.debug(f"No DAE files found in directory: {input_dir}")
                 return results
 
+            results = {str(path): (False, []) for path in dae_files}
             self.logger.info(f"Found {len(dae_files)} DAE files")
             self.check_blender_available()
 
@@ -154,38 +179,50 @@ class DAE2OBJConverter:
 
                     # Find generated OBJ files
                     obj_files = list(output_subdir.glob("*.obj"))
-                    results[str(dae_file)] = (True, obj_files)
+                    results[str(dae_file)] = (bool(obj_files), sorted(obj_files))
 
                     self.logger.debug(
                         f"  {dae_file.name}: Generated {len(obj_files)} OBJ files"
+                    )
+            else:
+                for dae_file in dae_files:
+                    target = (
+                        output_dir
+                        / dae_file.relative_to(input_dir).parent
+                        / dae_file.stem
+                    )
+                    results[str(dae_file)] = self._convert_with_trimesh(
+                        dae_file, target, preserve_textures
                     )
 
             return results
 
         except Exception as e:
-            self.logger.error(f"Error during batch directory conversion: {e}")
+            self.logger.warning(f"Blender batch conversion failed: {e}")
+            for dae_file in dae_files:
+                target = (
+                    output_dir / dae_file.relative_to(input_dir).parent / dae_file.stem
+                )
+                results[str(dae_file)] = self._convert_with_trimesh(
+                    dae_file, target, preserve_textures
+                )
             return results
 
-    def _collect_dae_files(self, input_dir: Path, recursive: bool) -> List[Path]:
+    def _collect_dae_files(self, input_dir: Path, recursive: bool) -> list[Path]:
         """Collect all DAE files"""
-        dae_files = []
-
-        if recursive:
-            pattern = "**/*.dae"
-        else:
-            pattern = "*.dae"
-
-        for dae_file in input_dir.glob(pattern):
-            dae_files.append(dae_file)
-
-        return sorted(dae_files)
+        iterator = input_dir.rglob("*") if recursive else input_dir.glob("*")
+        return sorted(
+            path
+            for path in iterator
+            if path.is_file() and path.suffix.lower() == ".dae"
+        )
 
     def _create_single_conversion_script(
         self, dae_file: Path, output_dir: Path, preserve_textures: bool
     ) -> str:
         """Create Blender script for single file conversion"""
-        dae_path = str(dae_file).replace("\\", "/")
-        output_path = str(output_dir).replace("\\", "/")
+        dae_path = str(dae_file.resolve()).replace("\\", "/")
+        output_path = str(output_dir.resolve()).replace("\\", "/")
 
         return f'''
 import bpy
@@ -266,7 +303,7 @@ def convert_dae_to_obj(dae_path, output_dir):
         
         # Count generated OBJ files
         obj_files_after = set(glob.glob(os.path.join(output_dir, '*.obj')))
-        new_obj_files = obj_files_after - obj_files_before
+        new_obj_files = {{output_path}} if os.path.isfile(output_path) else set()
         
         return len(new_obj_files)
         
@@ -277,25 +314,25 @@ def convert_dae_to_obj(dae_path, output_dir):
         return 0
 
 # Execute conversion
-result = convert_dae_to_obj(r"{dae_path}", r"{output_path}")
+result = convert_dae_to_obj({dae_path!r}, {output_path!r})
 
 if result > 0:
     print(f"✓ Conversion completed, generated {{result}} OBJ files")
 else:
-    print(f"✗ Conversion failed or no OBJ files generated")
+    raise RuntimeError("Conversion failed or no OBJ files generated")
 '''
 
     def _create_batch_conversion_script(
         self,
-        dae_files: List[Path],
+        dae_files: list[Path],
         input_dir: Path,
         output_dir: Path,
         preserve_textures: bool,
     ) -> str:
         """Create Blender script for batch conversion"""
-        dae_paths_str = [str(f).replace("\\", "/") for f in dae_files]
-        input_dir_str = str(input_dir).replace("\\", "/")
-        output_dir_str = str(output_dir).replace("\\", "/")
+        dae_paths_str = [str(f.resolve()).replace("\\", "/") for f in dae_files]
+        input_dir_str = str(input_dir.resolve()).replace("\\", "/")
+        output_dir_str = str(output_dir.resolve()).replace("\\", "/")
 
         # Create script
         script = f'''
@@ -428,7 +465,7 @@ def convert_dae_batch(dae_files, input_dir, output_dir, preserve_textures):
             
             # Count generated OBJ files
             obj_files_after = set(glob.glob(os.path.join(component_dir, '*.obj')))
-            new_obj_files = obj_files_after - obj_files_before
+            new_obj_files = {{output_file}} if os.path.isfile(output_file) else set()
             
             if new_obj_files:
                 total_converted += 1
@@ -447,25 +484,25 @@ def convert_dae_batch(dae_files, input_dir, output_dir, preserve_textures):
     print(f"Total generated: {{total_objs}} OBJ files")
     print("=" * 60)
     
-    return total_converted > 0
+    return total_converted == len(dae_files)
 
 # Execute batch conversion
 dae_files = {dae_paths_str}
-input_dir = r"{input_dir_str}"
-output_dir = r"{output_dir_str}"
+input_dir = {input_dir_str!r}
+output_dir = {output_dir_str!r}
 
 success = convert_dae_batch(dae_files, input_dir, output_dir, {preserve_textures})
 
 if success:
     print("Batch conversion completed successfully")
 else:
-    print("Errors occurred during batch conversion")
+    raise RuntimeError("Errors occurred during batch conversion")
 '''
         return script
 
     def _run_blender_conversion(
         self, script: str, dae_name: str, output_dir: Path
-    ) -> Tuple[bool, List[Path]]:
+    ) -> tuple[bool, list[Path]]:
         """Run Blender for single file conversion"""
         try:
             # Create temporary script file
@@ -478,10 +515,10 @@ else:
                 cmd = [
                     self.blender_executable,
                     "--background",
-                    "--python",
-                    script_path,
                     "--python-exit-code",
                     "1",
+                    "--python",
+                    script_path,
                 ]
 
                 self.logger.debug(f"Executing Blender command: {' '.join(cmd)}")
@@ -504,7 +541,7 @@ else:
 
                 # Check generated OBJ files
                 obj_files = list(output_dir.glob(f"{Path(dae_name).stem}*.obj"))
-                success = len(obj_files) > 0
+                success = result.returncode == 0 and len(obj_files) > 0
 
                 if success:
                     self.logger.debug(
@@ -515,10 +552,8 @@ else:
 
             finally:
                 # Clean up temporary script file
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(script_path)
-                except OSError:
-                    pass
 
         except Exception as e:
             self.logger.error(f"Error running Blender conversion: {e}")
@@ -537,10 +572,10 @@ else:
                 cmd = [
                     self.blender_executable,
                     "--background",
-                    "--python",
-                    script_path,
                     "--python-exit-code",
                     "1",
+                    "--python",
+                    script_path,
                 ]
 
                 self.logger.info("Running Blender for batch conversion...")
@@ -570,10 +605,8 @@ else:
 
             finally:
                 # Clean up temporary script file
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(script_path)
-                except OSError:
-                    pass
 
         except Exception as e:
             self.logger.error(f"Error running Blender batch conversion: {e}")
@@ -630,7 +663,7 @@ class TexturePathFixer:
         """Fix single MTL file"""
         try:
             # Read file content
-            with open(mtl_file, "r", encoding="utf-8", errors="ignore") as f:
+            with open(mtl_file, encoding="utf-8", errors="ignore") as f:
                 content = f.read()
 
             lines = content.split("\n")
@@ -675,7 +708,7 @@ class TexturePathFixer:
             self.logger.warning(f"Failed to fix MTL file {mtl_file}: {e}")
             return False
 
-    def _resolve_texture_path(self, texture_path: str, mtl_dir: Path) -> Optional[str]:
+    def _resolve_texture_path(self, texture_path: str, mtl_dir: Path) -> str | None:
         """Resolve texture path, return relative path"""
         try:
             # Remove possible file:// prefix
@@ -736,7 +769,7 @@ class TexturePathFixer:
             self.logger.debug(f"Failed to resolve texture path {texture_path}: {e}")
             return texture_path
 
-    def _copy_texture_file(self, source_path: Path, dest_dir: Path) -> Optional[str]:
+    def _copy_texture_file(self, source_path: Path, dest_dir: Path) -> str | None:
         """Copy texture file to destination directory"""
         try:
             if not source_path.exists():
@@ -780,7 +813,7 @@ class DAE2OBJPipeline:
 
     def process_urdf_directory(
         self, urdf_dir: Path, output_dir: Path
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Process all DAE files in a URDF directory
 
@@ -820,7 +853,7 @@ class DAE2OBJPipeline:
             )
             # 3. Count conversion results
             stats["dae_files_found"] = len(conversion_results)
-            for dae_file, (success, obj_files) in conversion_results.items():
+            for success, obj_files in conversion_results.values():
                 if success and obj_files:
                     stats["dae_files_converted"] += 1
                     stats["obj_files_generated"] += len(obj_files)
@@ -840,7 +873,7 @@ class DAE2OBJPipeline:
             traceback.print_exc()
             return stats
 
-    def _print_summary(self, stats: Dict[str, Any]) -> None:
+    def _print_summary(self, stats: dict[str, Any]) -> None:
         """Print conversion summary"""
         self.logger.info("=" * 60)
         self.logger.info("DAE Conversion Pipeline Summary:")
@@ -851,15 +884,15 @@ class DAE2OBJPipeline:
         self.logger.info(f"  MTL Files Fixed: {stats['mtl_files_fixed']}")
 
         if stats["success"]:
-            self.logger.info(f"  Status: ✓ SUCCESS")
+            self.logger.info("  Status: ✓ SUCCESS")
         else:
-            self.logger.warning(f"  Status: ✗ FAILED (No DAE files converted)")
+            self.logger.warning("  Status: ✗ FAILED (No DAE files converted)")
 
         self.logger.info("=" * 60)
 
     def process_single_dae(
         self, dae_file: Path, output_dir: Path, preserve_textures: bool = True
-    ) -> Tuple[bool, List[Path]]:
+    ) -> tuple[bool, list[Path]]:
         """
         Process single DAE file with full pipeline
 
@@ -983,7 +1016,7 @@ def main() -> int:
     success_count = sum(
         1 for success, obj_files in results.values() if success and obj_files
     )
-    return 0 if success_count else 1
+    return 0 if results and success_count == len(results) else 1
 
 
 if __name__ == "__main__":

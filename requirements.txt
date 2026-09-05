@@ -4,5 +4,5 @@ urdf2mjcf==0.2.39
 mujoco==3.8.0
 numpy
 pillow
-trimesh[easy]
+trimesh[easy]>=4.12
 tqdm

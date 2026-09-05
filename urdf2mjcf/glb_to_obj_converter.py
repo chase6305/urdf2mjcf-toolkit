@@ -29,9 +29,10 @@ import os
 import struct
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
 
 
 def check_dependencies():
@@ -83,57 +84,27 @@ class GLB2OBJConverter:
         Merging the GLB scene first keeps downstream output compact by default.
         """
 
-        if isinstance(scene, self.trimesh.Trimesh):
-            return scene
+        return MeshToOBJConverter._as_single_mesh(scene)
 
-        if not isinstance(scene, self.trimesh.Scene):
-            raise TypeError(
-                f"Expected trimesh.Scene or trimesh.Trimesh, got {type(scene)}"
-            )
-
-        # dump(concatenate=True) applies node transforms and concatenates geometry.
-        try:
-            dumped = scene.dump(concatenate=True)
-        except Exception:
-            dumped = None
-
-        # Depending on trimesh version and scene layout, dump may return Trimesh or list[Trimesh].
-        if dumped is None:
-            meshes = [
-                geom
-                for geom in scene.geometry.values()
-                if isinstance(geom, self.trimesh.Trimesh)
-            ]
-            if not meshes:
-                raise ValueError("Scene contains no mesh geometry")
-            return self.trimesh.util.concatenate(meshes)
-
-        if isinstance(dumped, list):
-            dumped_meshes = [m for m in dumped if isinstance(m, self.trimesh.Trimesh)]
-            if not dumped_meshes:
-                raise ValueError("Scene dump contains no mesh geometry")
-            return self.trimesh.util.concatenate(dumped_meshes)
-
-        return dumped
-
-    def find_glb_files(self, input_path: str) -> List[Path]:
+    def find_glb_files(self, input_path: str) -> list[Path]:
         """Find GLB files under an input path."""
         path = Path(input_path)
-        glb_files: List[Path] = []
+        glb_files: list[Path] = []
 
         if path.is_file() and path.suffix.lower() == ".glb":
             glb_files.append(path)
         elif path.is_dir():
-            glb_files.extend(path.rglob("*.glb"))
-            glb_files.extend(path.rglob("*.GLB"))
+            glb_files.extend(
+                p for p in path.rglob("*") if p.is_file() and p.suffix.lower() == ".glb"
+            )
 
         return sorted(set(glb_files))
 
     def extract_textures_from_scene(
         self, scene: Any, output_folder: Path
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Extract textures from a trimesh scene."""
-        texture_mapping: Dict[str, str] = {}
+        texture_mapping: dict[str, str] = {}
         texture_counter = 0
 
         self.logger.info(f"Extracting textures to: {output_folder}")
@@ -159,21 +130,25 @@ class GLB2OBJConverter:
                             ("map_Kd", "map_Kd"),
                         ]:
                             tex_value = getattr(material, attr_name, None)
-                            if tex_value is not None and not isinstance(
-                                tex_value, (list, tuple, int, float, str)
-                            ):
-                                if self._save_texture_image(
+                            if (
+                                tex_value is not None
+                                and not isinstance(
+                                    tex_value, (list, tuple, int, float, str)
+                                )
+                            ) and (
+                                self._save_texture_image(
                                     tex_value,
                                     alias,
                                     output_folder,
                                     texture_mapping,
                                     str(name),
-                                ):
-                                    self.logger.info(
-                                        f"Extracted texture from material attribute: {attr_name}"
-                                    )
-                                    texture_counter += 1
-                                    found_texture = True
+                                )
+                            ):
+                                self.logger.info(
+                                    f"Extracted texture from material attribute: {attr_name}"
+                                )
+                                texture_counter += 1
+                                found_texture = True
 
                         # If no texture exists but the material has a solid color, generate a small color texture.
                         if not found_texture:
@@ -222,18 +197,17 @@ class GLB2OBJConverter:
 
                     if hasattr(visual, "uv") and material is not None:
                         tex_image = getattr(material, "image", None)
-                        if tex_image is not None:
-                            if self._save_texture_image(
+                        if (tex_image is not None) and (
+                            self._save_texture_image(
                                 tex_image,
                                 "texture",
                                 output_folder,
                                 texture_mapping,
                                 str(name),
-                            ):
-                                self.logger.info(
-                                    "Extracted texture from UV material image"
-                                )
-                                texture_counter += 1
+                            )
+                        ):
+                            self.logger.info("Extracted texture from UV material image")
+                            texture_counter += 1
 
                 except Exception as exc:  # pragma: no cover - best effort extraction
                     self.logger.warning(f"Failed to extract texture for {name}: {exc}")
@@ -256,7 +230,7 @@ class GLB2OBJConverter:
         image_data: Any,
         texture_name: str,
         output_folder: Path,
-        texture_mapping: Dict[str, str],
+        texture_mapping: dict[str, str],
         mesh_name: str,
     ) -> bool:
         """Save a texture image."""
@@ -287,7 +261,7 @@ class GLB2OBJConverter:
         self,
         metadata: Any,
         output_folder: Path,
-        texture_mapping: Dict[str, str],
+        texture_mapping: dict[str, str],
     ) -> None:
         """Extract texture metadata recursively."""
         if isinstance(metadata, dict):
@@ -301,10 +275,10 @@ class GLB2OBJConverter:
 
     def extract_textures_from_glb(
         self, glb_path: Path, output_folder: Path
-    ) -> Tuple[Dict[str, str], Optional[Dict[str, Any]]]:
+    ) -> tuple[dict[str, str], dict[str, Any] | None]:
         """Extract embedded texture bytes directly from a GLB file."""
-        texture_mapping: Dict[str, str] = {}
-        gltf_data: Optional[Dict[str, Any]] = None
+        texture_mapping: dict[str, str] = {}
+        gltf_data: dict[str, Any] | None = None
 
         try:
             with open(glb_path, "rb") as file_obj:
@@ -388,7 +362,7 @@ class GLB2OBJConverter:
         return texture_mapping, gltf_data
 
     def _get_texture_name_from_usage(
-        self, gltf_data: Dict[str, Any], image_index: int, default_name: str
+        self, gltf_data: dict[str, Any], image_index: int, default_name: str
     ) -> str:
         """Derive a texture name from its glTF usage."""
         textures = gltf_data.get("textures", [])
@@ -424,14 +398,14 @@ class GLB2OBJConverter:
         return default_name
 
     def _build_material_texture_mapping(
-        self, gltf_data: Dict[str, Any], texture_mapping: Dict[str, str]
-    ) -> Dict[str, Dict[str, str]]:
+        self, gltf_data: dict[str, Any], texture_mapping: dict[str, str]
+    ) -> dict[str, dict[str, str]]:
         """Build a material-to-texture-file mapping."""
         textures = gltf_data.get("textures", [])
         materials = gltf_data.get("materials", [])
-        material_texture_map: Dict[str, Dict[str, str]] = {}
+        material_texture_map: dict[str, dict[str, str]] = {}
 
-        def resolve_texture(texture_index: Optional[int]) -> Optional[str]:
+        def resolve_texture(texture_index: int | None) -> str | None:
             if texture_index is None or texture_index >= len(textures):
                 return None
             source = textures[texture_index].get("source")
@@ -471,13 +445,13 @@ class GLB2OBJConverter:
         self,
         scene: Any,
         output_folder: Path,
-        texture_mapping: Dict[str, str],
-        gltf_data: Optional[Dict[str, Any]] = None,
+        texture_mapping: dict[str, str],
+        gltf_data: dict[str, Any] | None = None,
     ) -> Path:
         """Create an MTL material file and preserve base color when textures exist."""
         mtl_path = output_folder / f"{output_folder.name}.mtl"
 
-        material_texture_map: Dict[str, Dict[str, str]] = {}
+        material_texture_map: dict[str, dict[str, str]] = {}
         gltf_materials = []
         if gltf_data:
             material_texture_map = self._build_material_texture_mapping(
@@ -552,11 +526,12 @@ class GLB2OBJConverter:
                         texture_written.add("map_Occlusion")
 
                 # If no real texture is mapped, use the first extracted texture as a fallback.
-                if "map_Kd" not in texture_written:
-                    if not texture_written and texture_mapping:
-                        first_texture = next(iter(texture_mapping.values()))
-                        file_obj.write(f"map_Kd {first_texture}\n")
-                        texture_written.add("map_Kd")
+                if ("map_Kd" not in texture_written) and (
+                    not texture_written and texture_mapping
+                ):
+                    first_texture = next(iter(texture_mapping.values()))
+                    file_obj.write(f"map_Kd {first_texture}\n")
+                    texture_written.add("map_Kd")
 
                 # Write Kd only when the material has a texture; otherwise keep defaults.
                 if texture_written:
@@ -621,14 +596,14 @@ class GLB2OBJConverter:
                     vertices = mesh.vertices
                     for vertex in vertices:
                         file_obj.write(
-                            f"v {vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n"
+                            f"v {vertex[0]:.17g} {vertex[1]:.17g} {vertex[2]:.17g}\n"
                         )
 
                     has_uv = hasattr(mesh.visual, "uv") and mesh.visual.uv is not None
                     if has_uv:
                         uv_coords = mesh.visual.uv
                         for uv in uv_coords:
-                            file_obj.write(f"vt {uv[0]:.6f} {uv[1]:.6f}\n")
+                            file_obj.write(f"vt {uv[0]:.17g} {uv[1]:.17g}\n")
                     else:
                         uv_coords = []
 
@@ -640,7 +615,7 @@ class GLB2OBJConverter:
                         normals = mesh.vertex_normals
                         for normal in normals:
                             file_obj.write(
-                                f"vn {normal[0]:.6f} {normal[1]:.6f} {normal[2]:.6f}\n"
+                                f"vn {normal[0]:.17g} {normal[1]:.17g} {normal[2]:.17g}\n"
                             )
                     else:
                         normals = []
@@ -673,13 +648,15 @@ class GLB2OBJConverter:
 
                     file_obj.write("\n")
 
-                except Exception as exc:  # pragma: no cover - best effort export
-                    self.logger.warning(f"Failed to process geometry {name}: {exc}")
+                except Exception as exc:
+                    raise ValueError(
+                        f"Failed to export geometry {name}: {exc}"
+                    ) from exc
 
         return obj_path
 
     def convert_glb_to_obj(
-        self, glb_path: Path, output_folder: Optional[Path] = None
+        self, glb_path: Path, output_folder: Path | None = None
     ) -> bool:
         """Convert one GLB file to OBJ."""
         if output_folder is None:
@@ -694,6 +671,15 @@ class GLB2OBJConverter:
             )
 
             scene = self.trimesh.load(str(glb_path))
+
+            if isinstance(scene, self.trimesh.Scene) and not self.merge_meshes:
+                baked = self.trimesh.Scene()
+                for node in scene.graph.nodes_geometry:
+                    transform, geometry_name = scene.graph[node]
+                    mesh = scene.geometry[geometry_name].copy()
+                    mesh.apply_transform(transform)
+                    baked.add_geometry(mesh, geom_name=node, node_name=node)
+                scene = baked
 
             # Merge multi-geometry scenes to avoid many tiny OBJ fragments downstream.
             if self.merge_meshes and isinstance(scene, self.trimesh.Scene):
@@ -729,23 +715,19 @@ class GLB2OBJConverter:
 
     def convert_directory(
         self, input_dir: Path, output_dir: Path, recursive: bool = True
-    ) -> Dict[str, bool]:
+    ) -> dict[str, bool]:
         """Convert all GLB files in a directory while preserving relative layout."""
         input_dir = Path(input_dir)
         output_dir = Path(output_dir)
 
-        if recursive:
-            glb_files = sorted(input_dir.rglob("*.glb")) + sorted(
-                input_dir.rglob("*.GLB")
-            )
-        else:
-            glb_files = sorted(input_dir.glob("*.glb")) + sorted(
-                input_dir.glob("*.GLB")
-            )
+        iterator = input_dir.rglob("*") if recursive else input_dir.glob("*")
+        glb_files = sorted(
+            p for p in iterator if p.is_file() and p.suffix.lower() == ".glb"
+        )
 
-        results: Dict[str, bool] = {}
+        results: dict[str, bool] = {}
         if not glb_files:
-            self.logger.warning(f"No GLB files found in {input_dir}")
+            self.logger.debug(f"No GLB files found in {input_dir}")
             return results
 
         self.logger.info(f"Found {len(glb_files)} GLB files")
@@ -821,8 +803,12 @@ def main() -> int:
     if args.verbose:
         converter.logger.setLevel("DEBUG")
 
-    converter.convert_batch(args.input)
-    return 0
+    files = converter.find_glb_files(args.input)
+    if not files:
+        converter.logger.error("No GLB files found in %s", args.input)
+        return 1
+    success_count = converter.convert_batch(args.input)
+    return 0 if success_count == len(files) else 1
 
 
 if __name__ == "__main__":

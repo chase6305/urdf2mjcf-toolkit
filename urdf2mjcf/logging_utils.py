@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+import os
 
 __all__ = ["URDF2MJCFLogger", "setup_urdf_logging"]
 
@@ -55,7 +55,7 @@ class URDF2MJCFLogger:
     _initialized = False
 
     @classmethod
-    def get_logger(cls, name: Optional[str] = None) -> logging.Logger:
+    def get_logger(cls, name: str | None = None) -> logging.Logger:
         r"""Get or create a URDF assembly-specific logger
 
         Args:
@@ -89,9 +89,12 @@ class URDF2MJCFLogger:
             # Avoid duplicate handlers
             if not logger.handlers:
                 handler = logging.StreamHandler()
-                formatter = URDFColorFormatter(
-                    "[%(levelname)s] [%(name)s]: %(message)s"
+                formatter_type = (
+                    URDFColorFormatter
+                    if handler.stream.isatty() and "NO_COLOR" not in os.environ
+                    else logging.Formatter
                 )
+                formatter = formatter_type("[%(levelname)s] [%(name)s]: %(message)s")
                 handler.setFormatter(formatter)
                 logger.addHandler(handler)
                 logger.setLevel(cls._level)

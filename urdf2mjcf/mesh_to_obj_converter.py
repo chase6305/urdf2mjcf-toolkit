@@ -19,7 +19,9 @@ class MeshToOBJConverter:
         self.overwrite = overwrite
         self.logger = URDF2MJCFLogger.get_logger("MeshToOBJConverter")
 
-    def find_mesh_files(self, input_path: str | Path, recursive: bool = True) -> list[Path]:
+    def find_mesh_files(
+        self, input_path: str | Path, recursive: bool = True
+    ) -> list[Path]:
         """Return supported mesh files under a file or directory path."""
         path = Path(input_path)
         if path.is_file():
@@ -31,33 +33,40 @@ class MeshToOBJConverter:
         return sorted(
             candidate
             for candidate in iterator
-            if candidate.is_file()
-            and candidate.suffix.lower() in SUPPORTED_EXTENSIONS
+            if candidate.is_file() and candidate.suffix.lower() in SUPPORTED_EXTENSIONS
         )
 
     @staticmethod
     def _as_single_mesh(loaded):
         """Apply scene transforms and return one Trimesh instance."""
         if isinstance(loaded, trimesh.Trimesh):
-            return loaded
-        if not isinstance(loaded, trimesh.Scene):
+            mesh = loaded
+        elif isinstance(loaded, trimesh.Scene):
+            mesh = loaded.to_mesh()
+        else:
             raise TypeError(f"Unsupported trimesh result: {type(loaded)}")
-
-        mesh = loaded.dump(concatenate=True)
-        if not isinstance(mesh, trimesh.Trimesh) or mesh.vertices.size == 0:
-            raise ValueError("Mesh scene contains no geometry")
+        if mesh.vertices.size == 0 or mesh.faces.size == 0:
+            raise ValueError("Mesh contains no triangle geometry")
         return mesh
 
-    def convert_file(self, source: str | Path, output: str | Path | None = None) -> Path:
+    def convert_file(
+        self, source: str | Path, output: str | Path | None = None
+    ) -> Path:
         """Convert one supported mesh file and return the OBJ path."""
         source_path = Path(source)
         if not source_path.is_file():
             raise FileNotFoundError(f"Mesh file does not exist: {source_path}")
         if source_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
-            raise ValueError(f"Unsupported mesh format: {source_path.suffix}; supported: {supported}")
+            raise ValueError(
+                f"Unsupported mesh format: {source_path.suffix}; supported: {supported}"
+            )
 
         output_path = Path(output) if output else source_path.with_suffix(".obj")
+        if output_path.resolve() == source_path.resolve():
+            raise ValueError("Output must differ from the source mesh")
+        if output_path.is_dir():
+            raise IsADirectoryError(f"OBJ output path is a directory: {output_path}")
         if output_path.exists() and not self.overwrite:
             self.logger.info(f"Keeping existing OBJ: {output_path}")
             return output_path
@@ -97,9 +106,7 @@ def main() -> int:
     args = parser.parse_args()
 
     converter = MeshToOBJConverter(overwrite=args.overwrite)
-    results = converter.convert_directory(
-        args.input, recursive=not args.no_recursive
-    )
+    results = converter.convert_directory(args.input, recursive=not args.no_recursive)
     if not results:
         converter.logger.error("No supported mesh files found.")
         return 1

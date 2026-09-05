@@ -31,13 +31,13 @@ def test_fresh_output_is_accepted(tmp_path, monkeypatch):
     converter = _converter(tmp_path)
 
     def fake_run(*args, **kwargs):
-        converter.output_xml.write_text("fresh", encoding="utf-8")
+        converter.output_xml.write_text('<mujoco model="fresh" />', encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(converter_module.subprocess, "run", fake_run)
 
     assert converter.convert()
-    assert converter.get_output_xml().read_text(encoding="utf-8") == "fresh"
+    assert ET.parse(converter.get_output_xml()).getroot().get("model") == "fresh"
 
 
 def test_staged_urdf_prefers_converted_obj(tmp_path, monkeypatch):
@@ -57,9 +57,44 @@ def test_staged_urdf_prefers_converted_obj(tmp_path, monkeypatch):
         staged_urdf = Path(command[1])
         mesh = ET.parse(staged_urdf).getroot().find(".//mesh")
         assert mesh.get("filename").endswith("/visual/arm.obj")
-        converter.output_xml.write_text("fresh", encoding="utf-8")
+        converter.output_xml.write_text('<mujoco model="fresh" />', encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(converter_module.subprocess, "run", fake_run)
 
     assert converter.convert()
+
+
+def test_subprocess_paths_are_absolute_and_staging_is_cleaned(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("robot.urdf").write_text('<robot name="test" />')
+    converter = URDF2MJCFConverter(
+        Path("robot.urdf"), Path("output"), Path("output/assets")
+    )
+    staged = []
+
+    def fake_run(command, **kwargs):
+        assert Path(command[1]).is_absolute()
+        assert Path(command[-1]).is_absolute()
+        assert Path(kwargs["cwd"]).is_absolute()
+        staged.append(Path(command[1]))
+        converter.output_xml.write_text('<mujoco model="fresh" />')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(converter_module.subprocess, "run", fake_run)
+    assert converter.convert()
+    assert not staged[0].exists()
+    assert Path("robot.urdf").read_text() == '<robot name="test" />'
+
+
+def test_missing_mesh_fails_before_external_command(tmp_path, monkeypatch):
+    converter = _converter(tmp_path)
+    converter.urdf_path.write_text(
+        '<robot><link><visual><geometry><mesh filename="missing.obj" /></geometry></visual></link></robot>'
+    )
+    calls = []
+    monkeypatch.setattr(
+        converter_module.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    assert not converter.convert()
+    assert calls == []
