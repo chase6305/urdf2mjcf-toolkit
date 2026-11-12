@@ -97,6 +97,78 @@ def _read_tensor(inertial):
     return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
 
 
+def test_repeated_meshes_reuse_properties_without_sharing_frames_or_stale_data(
+    tmp_path, monkeypatch
+):
+    import urdf2mjcf.urdf_inertia_calculator as calculator_module
+
+    mesh = tmp_path / "box.obj"
+    trimesh.creation.box(extents=[1, 2, 3]).export(mesh)
+    alias = tmp_path / "alias.obj"
+    alias.symlink_to(mesh)
+    root = ET.Element("robot", name="shared")
+    scales = ([1, 2, 3], [1, 2, 3], [2, 1, 1])
+    for index, (reference, scale) in enumerate(
+        zip((mesh.name, mesh.as_uri(), alias.name), scales, strict=True)
+    ):
+        link = ET.SubElement(root, "link", name=f"link{index}")
+        inertial = ET.SubElement(link, "inertial")
+        ET.SubElement(inertial, "mass", value=str(index + 1))
+        ET.SubElement(inertial, "inertia", ixx="0", iyy="0", izz="0")
+        visual = ET.SubElement(link, "visual")
+        ET.SubElement(
+            visual,
+            "origin",
+            xyz=f"{index} {2*index} {-index}",
+            rpy=f"0 0 {np.pi/2 if index == 1 else 0}",
+        )
+        ET.SubElement(
+            ET.SubElement(visual, "geometry"),
+            "mesh",
+            filename=reference,
+            scale=" ".join(map(str, scale)),
+        )
+    source = tmp_path / "robot.urdf"
+    ET.ElementTree(root).write(source)
+    original = source.read_bytes()
+    loads = []
+    load = calculator_module.trimesh.load
+
+    def counted(path, *args, **kwargs):
+        loads.append(path)
+        return load(path, *args, **kwargs)
+
+    monkeypatch.setattr(calculator_module.trimesh, "load", counted)
+    calculator = URDFInertiaCalculator(source)
+    for iteration, source_size in enumerate(([1, 2, 3], [2, 2, 3]), start=1):
+        if iteration == 2:
+            trimesh.creation.box(extents=source_size).export(mesh)
+        assert calculator.update_inertia()
+        assert len(loads) == 2 * iteration
+        assert set(loads) == {mesh}
+        actual = ET.parse(source)
+        for index, scale in enumerate(scales):
+            inertial = actual.find(f"link[@name='link{index}']/inertial")
+            dimensions = np.array(source_size) * scale
+            x, y, z = dimensions
+            expected = (
+                (index + 1)
+                * np.array([y * y + z * z, x * x + z * z, x * x + y * y])
+                / 12
+            )
+            if index == 1:
+                expected = expected[[1, 0, 2]]
+            np.testing.assert_allclose(
+                _read_tensor(inertial), np.diag(expected), atol=1e-9
+            )
+            np.testing.assert_allclose(
+                [float(v) for v in inertial.find("origin").get("xyz").split()],
+                [index, 2 * index, -index],
+                atol=1e-12,
+            )
+        assert source.with_suffix(".urdf.backup").read_bytes() == original
+
+
 def test_recalculation_applies_mesh_scale_and_both_coordinate_frames(tmp_path):
     mesh = trimesh.creation.box(extents=[1, 2, 3])
     mesh.apply_translation([0.2, 0.3, 0.4])

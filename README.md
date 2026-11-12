@@ -222,6 +222,8 @@ The standalone command updates the input in place and keeps a `.urdf.backup` whe
 
 Regularization tolerances and the optional minimum eigenvalue must be finite and nonnegative. Invalid parameters or numerical overflow abort the update before writing the URDF.
 
+Within one inertia update, repeated references to the same mesh and effective scale reuse its unit-density mass properties. Per-instance frames and per-link masses are applied separately. Loaded triangle meshes are released after computing these properties, and the cache is discarded after the update so a later call observes edited source meshes.
+
 Validate URDF inertia values without modifying the file:
 
 ```bash

@@ -262,7 +262,10 @@ class URDFInertiaCalculator:
         return None, None
 
     def _geometry_properties(
-        self, element: ET.Element, resolver: MeshPathResolver
+        self,
+        element: ET.Element,
+        resolver: MeshPathResolver,
+        mesh_cache: dict | None = None,
     ) -> dict:
         geometry = element.find("geometry")
         if len(geometry) != 1:
@@ -272,7 +275,13 @@ class URDFInertiaCalculator:
         if shape.tag == "mesh":
             path = resolver.resolve(shape.get("filename", shape.get("file", "")))
             scale = vector(shape.get("scale", "1 1 1")) * self.scale
-            properties = self._mesh_properties(path, scale)
+            key = (path, tuple(scale))
+            if mesh_cache is None:
+                properties = self._mesh_properties(path, scale)
+            else:
+                if key not in mesh_cache:
+                    mesh_cache[key] = self._mesh_properties(path, scale)
+                properties = mesh_cache[key]
             volume, center, tensor = (
                 properties[key] for key in ("volume", "center_mass", "inertia")
             )
@@ -329,6 +338,9 @@ class URDFInertiaCalculator:
             resolver = MeshPathResolver(
                 self.urdf_dir, self.urdf_dir, prefer_converted=False
             )
+            # Keep only unit-density mass properties, not loaded triangle meshes.
+            # Scope the cache to this update so edits are observed on the next run.
+            mesh_cache = {}
             updated = []
             for link in root.findall("link"):
                 inertial = link.find("inertial")
@@ -356,7 +368,7 @@ class URDFInertiaCalculator:
                     if mass <= 0:
                         raise ValueError("Mass must be positive")
                     parts = [
-                        self._geometry_properties(element, resolver)
+                        self._geometry_properties(element, resolver, mesh_cache)
                         for element in geometries
                     ]
                     volume = sum(part["volume"] for part in parts)
