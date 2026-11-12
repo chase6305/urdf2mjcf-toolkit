@@ -157,6 +157,46 @@ def test_native_visual_named_floor_keeps_its_geometry_and_a_distinct_ground(tmp_
     assert np.count_nonzero(model.geom_type == mujoco.mjtGeom.mjGEOM_PLANE) == 1
     np.testing.assert_allclose(model.geom("floor").size, [0.05, 0.1, 0.15])
     assert source.read_bytes() == original
+    assert manager.last_report["body_aliases"] == {}
+
+
+@pytest.mark.parametrize("world_position", ["root", "child"])
+def test_external_world_link_gets_a_distinct_body_without_losing_physics(
+    tmp_path, world_position
+):
+    root_name, child_name = (
+        ("world", "world_urdf") if world_position == "root" else ("world_urdf", "world")
+    )
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        f'<robot name="world_body"><link name="{root_name}"/><link name="{child_name}">'
+        '<inertial><origin xyz="0.1 0.2 0.3"/><mass value="2"/>'
+        '<inertia ixx="2" iyy="3" izz="4"/></inertial>'
+        '<visual><geometry><box size="0.1 0.2 0.3"/></geometry></visual></link>'
+        f'<joint name="world" type="revolute"><parent link="{root_name}"/>'
+        f'<child link="{child_name}"/><origin xyz="0.1 0.2 0.3"/>'
+        '<limit lower="-1" upper="1" effort="10"/></joint></robot>'
+    )
+    original = source.read_bytes()
+    manager = MujocoConversionManager(
+        source, tmp_path / "output", backend="urdf2mjcf", auto_recalculate_inertia=False
+    )
+    output = manager.run()
+    aliases = manager.last_report["body_aliases"]
+    assert aliases == {"world": "world_urdf_1"}
+    model = mujoco.MjModel.from_xml_path(str(output))
+    moving = model.body(aliases.get(child_name, child_name))
+    np.testing.assert_allclose(moving.mass, [2])
+    np.testing.assert_allclose(moving.ipos, [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(np.sort(moving.inertia), [2, 3, 4])
+    np.testing.assert_allclose(moving.pos, [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(model.joint("world").range, [-1, 1])
+    assert model.actuator_trnid[0, 0] == model.joint("world").id
+    assert model.body("world").id == 0
+    assert model.body("world_urdf_1").id > 0
+    manager.run()
+    assert manager.last_report["body_aliases"] == aliases
+    assert source.read_bytes() == original
 
 
 @pytest.mark.parametrize("backend", ["urdf2mjcf", "mujoco"])

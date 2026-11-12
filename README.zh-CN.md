@@ -120,6 +120,8 @@ urdf2mjcf-toolkit robot.urdf ./output --backend auto --report ./reports/conversi
 
 转换报告还包含 `inertia_recoveries`：每条记录提供后端、修改的 `links` 及重算状态（`recalculated`、`unchanged` 或 `failed`，失败时包含错误）。`recalculated` 仅表示临时 URDF 的惯量已修复，整体转换仍可能在后续阶段失败。
 
+`body_aliases` 记录需要使用不同 MJCF 名称的源 body。MuJoCo 将 `world` 保留给内置世界 body，因此外部后端会把同名 URDF link 导出为 `world_urdf`，若重名则使用可用的编号后缀；源坐标帧、惯量和 body 引用一起保留。原生导入继续采用 MuJoCo 对 URDF world 根的处理。
+
 `mesh_preprocessing` 记录常规资源目录处理后，通过 URDF 引用发现的补充转换。每项包含原始 `source`、`format`、引用它的 `link`/`kind`/`reference`、`status`，以及相对输出目录的 `output` 路径；失败时包含 `error`。`converted` 表示暂存转换成功，使用输出前仍需检查整体报告状态。常规目录阶段已处理的源文件不列入该列表。
 
 成功转换的报告还包含 `assets` 资源清单。每项提供相对输出目录的 `path`、`size_bytes`、SHA-256 校验值 `sha256`，以及引用它的 MJCF 资源 `references`（含 `type`、`name`、`attribute`）。清单记录最终模型的文件依赖，不包含程序生成的纹理及未使用的中间文件。批量报告中，每个成功模型也包含相同清单。

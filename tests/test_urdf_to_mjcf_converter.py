@@ -3,7 +3,40 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import urdf2mjcf.urdf_to_mjcf_converter as converter_module
+from urdf2mjcf.physics import rename_reserved_body_names
 from urdf2mjcf.urdf_to_mjcf_converter import URDF2MJCFConverter
+
+
+def test_world_alias_updates_body_references_without_renaming_joints_or_geoms():
+    root = ET.fromstring(
+        '<mujoco><worldbody><body name="world" pos="1 2 3"><joint name="world"/>'
+        '<geom name="world"/><body name="world_urdf"/></body>'
+        '<camera target="world"/><light target="world"/></worldbody>'
+        '<contact><exclude body1="world" body2="world_urdf"/></contact>'
+        '<sensor><subtreecom body="world"/><framepos objtype="body" objname="world"/>'
+        '<framequat objtype="xbody" objname="world" reftype="body" refname="world"/>'
+        '<framepos objtype="geom" objname="world"/></sensor>'
+        '<actuator><motor joint="world"/></actuator></mujoco>'
+    )
+    aliases = rename_reserved_body_names(root)
+    assert aliases == {"world": "world_urdf_1"}
+    body = root.find("worldbody/body")
+    assert body.attrib == {"name": "world_urdf_1", "pos": "1 2 3"}
+    assert body.find("joint").get("name") == "world"
+    assert body.find("geom").get("name") == "world"
+    assert root.find("actuator/motor").get("joint") == "world"
+    assert root.find("contact/exclude").attrib == {
+        "body1": "world_urdf_1",
+        "body2": "world_urdf",
+    }
+    assert root.find("sensor/subtreecom").get("body") == "world_urdf_1"
+    assert root.find("sensor/framepos").get("objname") == "world_urdf_1"
+    quaternion = root.find("sensor/framequat")
+    assert quaternion.get("objname") == quaternion.get("refname") == "world_urdf_1"
+    assert root.findall("sensor/framepos")[1].get("objname") == "world"
+    assert root.find("worldbody/camera").get("target") == "world_urdf_1"
+    assert root.find("worldbody/light").get("target") == "world_urdf_1"
+    assert rename_reserved_body_names(root) == {}
 
 
 def _converter(tmp_path):

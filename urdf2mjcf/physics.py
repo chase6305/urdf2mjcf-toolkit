@@ -249,6 +249,33 @@ def restore_urdf_physics(mjcf: ET.Element, urdf: ET.Element) -> None:
                         actuator.attrib.pop("forcerange", None)
 
 
+def rename_reserved_body_names(mjcf: ET.Element) -> dict[str, str]:
+    """Keep an imported body called world distinct from MuJoCo's world body."""
+    bodies = list(mjcf.iter("body"))
+    source = next((body for body in bodies if body.get("name") == "world"), None)
+    if source is None:
+        return {}
+    occupied = {body.get("name") for body in bodies}
+    name, index = "world_urdf", 0
+    while name in occupied:
+        index += 1
+        name = f"world_urdf_{index}"
+    source.set("name", name)
+    for element in mjcf.iter():
+        for attribute in ("body", "body1", "body2"):
+            if element.get(attribute) == "world":
+                element.set(attribute, name)
+        for kind, attribute in (("objtype", "objname"), ("reftype", "refname")):
+            if (
+                element.get(kind) in {"body", "xbody"}
+                and element.get(attribute) == "world"
+            ):
+                element.set(attribute, name)
+        if element.tag in {"camera", "light"} and element.get("target") == "world":
+            element.set("target", name)
+    return {"world": name}
+
+
 def validate_compiled_physics(model) -> None:
     """Compilation alone permits infinity in some physical model arrays."""
     for name in (

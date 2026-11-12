@@ -127,6 +127,8 @@ Checks do not invoke converters or create the conversion output directory. Mesh 
 
 Conversion reports also include `inertia_recoveries`: each entry identifies the backend, affected `links`, and recalculation status (`recalculated`, `unchanged`, or `failed`, with an error on failure). `recalculated` describes the temporary URDF repair; the overall conversion can still fail in a later stage.
 
+`body_aliases` records source body names that needed a distinct MJCF name. The external backend exports a URDF link named `world` as `world_urdf` (or an available numbered suffix), since MuJoCo reserves `world` for its built-in world body. The source frame, inertia, and body references are retained. Native import keeps MuJoCo's handling of a URDF world root.
+
 `mesh_preprocessing` records supplemental conversions discovered through URDF references after conventional asset-directory processing. Each entry includes the original `source`, `format`, referencing `link`/`kind`/`reference` values, `status`, and output-relative `output` path. Failed conversions include `error`. `converted` means staging succeeded; check the overall report status before using the output. Sources already handled by directory processing are omitted from this list.
 
 Successful conversion reports include an `assets` manifest. Each entry gives the output-relative `path`, `size_bytes`, SHA-256 checksum (`sha256`), and referencing MJCF assets (`references`, with `type`, `name`, and `attribute`). Entries describe the final model's file dependencies; procedural textures and unused intermediate files are not included. Batch results carry the same manifest for each successful model.

@@ -13,7 +13,11 @@ from pathlib import Path
 from urdf2mjcf.asset_paths import MeshPathResolver
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.mesh_identity import restore_external_mesh_references
-from urdf2mjcf.physics import normalize_urdf_physics, restore_urdf_physics
+from urdf2mjcf.physics import (
+    normalize_urdf_physics,
+    rename_reserved_body_names,
+    restore_urdf_physics,
+)
 from urdf2mjcf.urdf_validation import (
     URDFValidationError,
     validate_urdf_physics,
@@ -31,6 +35,7 @@ class URDFConverterBase(ABC):
         self.mesh_search_dir = self.urdf_path.parent
         self.last_error: str | None = None
         self.last_error_codes: tuple[str, ...] = ()
+        self.body_aliases: dict[str, str] = {}
         self.prepared_tree: ET.ElementTree | None = None
         self.mesh_source_map: dict[Path, Path] | None = None
         self.logger = URDF2MJCFLogger.get_logger(type(self).__name__)
@@ -95,6 +100,7 @@ class URDF2MJCFConverter(URDFConverterBase):
         successful = False
         self.last_error = None
         self.last_error_codes = ()
+        self.body_aliases = {}
         try:
             self.logger.info("Converting URDF to MJCF using urdf2mjcf...")
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -196,6 +202,7 @@ class URDF2MJCFConverter(URDFConverterBase):
         restore_external_mesh_references(
             converted.getroot(), source.getroot(), self.assets_dir
         )
+        self.body_aliases = rename_reserved_body_names(converted.getroot())
         converted.write(self.output_xml, encoding="utf-8", xml_declaration=True)
 
     def get_output_xml(self) -> Path | None:

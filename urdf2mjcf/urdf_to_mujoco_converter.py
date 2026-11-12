@@ -258,6 +258,7 @@ class MujocoConversionManager:
             inertia_recovery_attempts=0,
             inertia_recoveries=[],
             mesh_preprocessing=[],
+            body_aliases={},
             options={
                 "fixed_base": self.fixed_base,
                 "export_collision": self.export_collision,
@@ -562,6 +563,9 @@ class MujocoConversionManager:
             self._publish(pending_path, final_path)
             if self.last_report is not None:
                 self.last_report["assets"] = assets
+                self.last_report["body_aliases"] = getattr(
+                    urdf_converter, "body_aliases", {}
+                ).copy()
                 self.last_report["statistics"] = {
                     "bodies": model.nbody - 1,
                     "joints": model.njnt,
