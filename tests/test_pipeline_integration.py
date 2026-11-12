@@ -13,6 +13,23 @@ import trimesh
 from urdf2mjcf.urdf_to_mujoco_converter import MujocoConversionManager
 
 
+def test_native_visual_named_floor_keeps_its_geometry_and_a_distinct_ground(tmp_path):
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        '<robot name="floor_name"><link name="arm"><inertial><mass value="2"/>'
+        '<inertia ixx="2" iyy="3" izz="4"/></inertial><visual name="floor">'
+        '<geometry><box size="0.1 0.2 0.3"/></geometry></visual></link></robot>'
+    )
+    original = source.read_bytes()
+    manager = MujocoConversionManager(source, tmp_path / "output", backend="mujoco")
+    model = mujoco.MjModel.from_xml_path(str(manager.run()))
+    assert model.ngeom == 2
+    assert model.geom("floor").type[0] == mujoco.mjtGeom.mjGEOM_BOX
+    assert np.count_nonzero(model.geom_type == mujoco.mjtGeom.mjGEOM_PLANE) == 1
+    np.testing.assert_allclose(model.geom("floor").size, [0.05, 0.1, 0.15])
+    assert source.read_bytes() == original
+
+
 @pytest.mark.parametrize("backend", ["urdf2mjcf", "mujoco"])
 @pytest.mark.parametrize("mesh_format", [None, "stl", "glb", "dae"])
 @pytest.mark.parametrize("fixed_base", [True, False])

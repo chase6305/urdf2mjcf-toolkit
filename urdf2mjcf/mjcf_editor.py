@@ -209,6 +209,14 @@ class MJCFEditor:
         root_body.insert(0, fj)
         return True
 
+    def _unused_name(self, tag: str, preferred: str) -> str:
+        occupied = {element.get("name") for element in self.root.iter(tag)}
+        name, index = preferred, 0
+        while name in occupied:
+            index += 1
+            name = f"{preferred}_{index}"
+        return name
+
     def add_default_ground_plane(self):
         """
         Add a default floor, skybox, lighting, camera, and visual settings.
@@ -242,11 +250,12 @@ class MJCFEditor:
                 )
                 asset_node.append(skybox)
             # groundplane texture
+            texture_name = self._unused_name("texture", "groundplane")
             tex = ET.Element(
                 "texture",
                 attrib={
                     "type": "2d",
-                    "name": "groundplane",
+                    "name": texture_name,
                     "builtin": "checker",
                     "mark": "edge",
                     "rgb1": "0.2 0.3 0.4",
@@ -262,7 +271,7 @@ class MJCFEditor:
                 "material",
                 attrib={
                     "name": "groundplane",
-                    "texture": "groundplane",
+                    "texture": texture_name,
                     "texuniform": "true",
                     "texrepeat": "5 5",
                     "reflectance": "0.2",
@@ -276,12 +285,17 @@ class MJCFEditor:
             worldbody = ET.Element("worldbody")
             self.root.append(worldbody)
 
-        # Add a floor only when missing.
-        if worldbody.find("geom[@name='floor']") is None:
+        # Reuse an existing floor, including one given a distinct name on an
+        # earlier call. A robot geom called floor must retain its own identity.
+        if not any(
+            geom.get("name") == "floor"
+            or (geom.get("type") == "plane" and geom.get("material") == "groundplane")
+            for geom in worldbody.findall("geom")
+        ):
             floor = ET.Element(
                 "geom",
                 attrib={
-                    "name": "floor",
+                    "name": self._unused_name("geom", "floor"),
                     "size": "0 0 0.05",
                     "type": "plane",
                     "material": "groundplane",
@@ -296,7 +310,9 @@ class MJCFEditor:
                 attrib={"pos": "0 0 1.5", "dir": "0 0 -1", "directional": "true"},
             )
             worldbody.append(light)
-        if worldbody.find("camera[@name='top_camera']") is None:
+        if not any(
+            camera.get("name") == "top_camera" for camera in self.root.iter("camera")
+        ):
             cam = ET.Element(
                 "camera",
                 attrib={"name": "top_camera", "pos": "0 0 5", "xyaxes": "1 0 0 0 1 0"},

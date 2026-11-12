@@ -34,6 +34,63 @@ def test_ground_plane_setup_is_idempotent(tmp_path):
     assert len(editor.root.findall(".//geom[@name='floor']")) == 1
 
 
+@pytest.mark.parametrize("location", ["body", "world"])
+def test_default_scene_preserves_conflicting_geom_texture_and_camera_names(
+    tmp_path, location
+):
+    import mujoco
+
+    editor = MJCFEditor(_write_model(tmp_path, '<body name="root"/>'))
+    asset = editor.root.find("asset")
+    original_texture = ET.SubElement(
+        asset,
+        "texture",
+        name="groundplane",
+        type="2d",
+        builtin="flat",
+        rgb1="1 0 0",
+        width="2",
+        height="2",
+    )
+    ET.SubElement(asset, "material", name="paint", texture="groundplane")
+    worldbody = editor.root.find("worldbody")
+    body = worldbody.find("body")
+    original_geom = ET.SubElement(
+        body if location == "body" else worldbody,
+        "geom",
+        name="floor",
+        type="box",
+        size="0.1 0.2 0.3",
+        material="paint",
+    )
+    camera = ET.SubElement(body, "camera", name="top_camera", pos="1 2 3")
+    originals = [
+        (element, element.attrib.copy())
+        for element in (original_texture, original_geom, camera)
+    ]
+    editor.add_default_ground_plane()
+    editor.add_default_ground_plane()
+    assert all(element.attrib == attributes for element, attributes in originals)
+    for tag in ("geom", "texture", "camera"):
+        names = [
+            element.get("name")
+            for element in editor.root.iter(tag)
+            if element.get("name")
+        ]
+        assert len(names) == len(set(names))
+    planes = [geom for geom in worldbody.findall("geom") if geom.get("type") == "plane"]
+    assert len(planes) == int(location == "body")
+    if planes:
+        assert planes[0].get("name") != "floor"
+    saved = tmp_path / "prepared.xml"
+    editor.save(saved)
+    editor = MJCFEditor(saved)
+    editor.add_default_ground_plane()
+    model = mujoco.MjModel.from_xml_string(ET.tostring(editor.root, encoding="unicode"))
+    assert model.ngeom == 1 + int(location == "body") and model.ncam == 1
+    assert model.geom("floor").type[0] == mujoco.mjtGeom.mjGEOM_BOX
+
+
 @pytest.mark.parametrize(
     "attributes", [{"rgba": "1 0 0 1"}, {"texture": "exact_source"}]
 )
