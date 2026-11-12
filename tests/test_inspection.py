@@ -89,3 +89,20 @@ def test_inspection_handles_long_joint_chains_without_recursion(tmp_path):
     source = tmp_path / "robot.urdf"
     ET.ElementTree(robot).write(source)
     assert inspect_urdf(source)["status"] == "passed"
+
+
+def test_inspection_reports_mesh_symlink_loops_without_raising(tmp_path):
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        '<robot><link name="arm"><visual><geometry><mesh filename="loop.obj"/>'
+        "</geometry></visual></link></robot>"
+    )
+    (tmp_path / "loop.obj").symlink_to("loop.obj")
+    original = source.read_bytes()
+    report = inspect_urdf(source)
+    assert report["status"] == "failed"
+    assert [issue["code"] for issue in report["issues"]] == ["unresolved_mesh"]
+    assert report["meshes"][0]["resolved_path"] is None
+    assert "loop.obj" in report["issues"][0]["message"]
+    assert source.read_bytes() == original
+    assert (tmp_path / "loop.obj").is_symlink()

@@ -21,6 +21,33 @@ def _source(root, relative, content=ROBOT):
     return path
 
 
+@pytest.mark.parametrize("check_only", [False, True])
+def test_mesh_symlink_loop_does_not_abort_other_batch_jobs(tmp_path, check_only):
+    inputs = tmp_path / "models"
+    broken = _source(
+        inputs,
+        "a.urdf",
+        ROBOT.replace('<box size="1 1 1"/>', '<mesh filename="loop.obj"/>'),
+    )
+    original = broken.read_bytes()
+    (inputs / "loop.obj").symlink_to("loop.obj")
+    _source(inputs, "b.urdf")
+    output = tmp_path / "converted"
+    report = BatchConversionManager(
+        inputs, output, backend="mujoco", check_only=check_only
+    ).run()
+    assert report["summary"] == {"total": 2, "succeeded": 1, "failed": 1, "skipped": 0}
+    assert report["results"][0]["status"] == "failed"
+    assert report["results"][1]["status"] == ("passed" if check_only else "success")
+    assert broken.read_bytes() == original
+    assert (inputs / "loop.obj").is_symlink()
+    if check_only:
+        assert report["results"][0]["issues"][0]["code"] == "unresolved_mesh"
+        assert not output.exists()
+    else:
+        assert mujoco.MjModel.from_xml_path(str(output / "b/b.xml")).nbody == 2
+
+
 def test_batch_converts_same_named_models_and_continues_after_failure(tmp_path):
     inputs = tmp_path / "models"
     first = _source(inputs, "a/robot.urdf")

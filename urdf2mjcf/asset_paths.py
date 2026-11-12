@@ -34,6 +34,17 @@ class MeshPathResolver:
 
     def resolve(self, reference: str) -> Path:
         """Return an existing mesh, rejecting missing and ambiguous references."""
+        try:
+            return self._resolve_reference(reference)
+        except RuntimeError as exc:
+            # Python 3.11/3.12 Path.resolve raises RuntimeError for symlink
+            # loops. Treat it as an input error so inspection can retain its
+            # unresolved_mesh diagnostic and unrelated batch jobs can continue.
+            raise ValueError(
+                f"Cannot resolve mesh reference {reference!r}: {exc}"
+            ) from exc
+
+    def _resolve_reference(self, reference: str) -> Path:
         reference = reference.replace("\\", "/")
         if not reference or reference.isspace():
             raise ValueError("Mesh filename is empty")

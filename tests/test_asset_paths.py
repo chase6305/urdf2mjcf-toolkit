@@ -111,6 +111,12 @@ def test_ambiguous_basename_is_rejected(tmp_path):
         MeshPathResolver(tmp_path, tmp_path / "assets").resolve("arm.obj")
 
 
+def test_mesh_symlink_loop_is_a_path_input_error(tmp_path):
+    (tmp_path / "loop.obj").symlink_to("loop.obj")
+    with pytest.raises((ValueError, OSError), match="loop.obj"):
+        MeshPathResolver(tmp_path, tmp_path).resolve("loop.obj")
+
+
 def test_basename_fallback_indexes_assets_only_once(tmp_path, monkeypatch):
     assets = tmp_path / "assets"
     assets.mkdir()
