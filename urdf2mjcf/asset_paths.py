@@ -34,8 +34,8 @@ class MeshPathResolver:
 
     def resolve(self, reference: str) -> Path:
         """Return an existing mesh, rejecting missing and ambiguous references."""
-        reference = reference.strip().replace("\\", "/")
-        if not reference:
+        reference = reference.replace("\\", "/")
+        if not reference or reference.isspace():
             raise ValueError("Mesh filename is empty")
         package = None
         if "://" in reference:
@@ -44,6 +44,10 @@ class MeshPathResolver:
                 reference = unquote(uri.path)
             elif uri.scheme == "package":
                 package = uri.netloc
+                if not package:
+                    raise ValueError(
+                        f"Package mesh URI is missing a package name: {reference}"
+                    )
                 reference = unquote(uri.path).lstrip("/")
             else:
                 raise ValueError(f"Unsupported mesh URI: {reference}")

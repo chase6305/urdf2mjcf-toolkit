@@ -45,6 +45,32 @@ def test_file_uri_with_spaces_is_resolved(tmp_path):
     )
 
 
+@pytest.mark.parametrize("name", [" arm.obj", "arm.obj "])
+@pytest.mark.parametrize("prefer_converted", [False, True])
+def test_filename_whitespace_cannot_select_a_different_source(
+    tmp_path, name, prefer_converted
+):
+    exact = tmp_path / name
+    exact.write_bytes(b"intended geometry")
+    (tmp_path / "arm.obj").write_bytes(b"unrelated geometry")
+    resolver = MeshPathResolver(
+        tmp_path, tmp_path / "assets", prefer_converted=prefer_converted
+    )
+    assert resolver.resolve(name) == exact
+
+
+@pytest.mark.parametrize("reference", ["package:///arm.obj", "package://"])
+@pytest.mark.parametrize("prefer_converted", [False, True])
+def test_missing_package_name_cannot_select_a_local_mesh(
+    tmp_path, reference, prefer_converted
+):
+    (tmp_path / "arm.obj").touch()
+    with pytest.raises(ValueError, match="missing a package name"):
+        MeshPathResolver(tmp_path, tmp_path, prefer_converted=prefer_converted).resolve(
+            reference
+        )
+
+
 def test_package_uri_resolves_from_urdf_subdirectory(tmp_path):
     package = tmp_path / "robot_description"
     source_dir = package / "urdf"
