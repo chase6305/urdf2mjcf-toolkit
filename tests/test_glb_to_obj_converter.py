@@ -62,7 +62,8 @@ def test_glb_export_does_not_round_small_mesh_to_zero(tmp_path):
 
 
 @pytest.mark.parametrize("merge", [False, True])
-def test_named_materials_keep_their_own_textures_and_colors(tmp_path, merge):
+@pytest.mark.parametrize("naming", ["unique", "duplicate", "unnamed"])
+def test_named_materials_keep_their_own_textures_and_colors(tmp_path, merge, naming):
     import numpy as np
     import trimesh
     from PIL import Image
@@ -71,6 +72,8 @@ def test_named_materials_keep_their_own_textures_and_colors(tmp_path, merge):
     for index, (name, rgb) in enumerate(
         (("red_paint", (255, 0, 0)), ("blue_paint", (0, 0, 255)))
     ):
+        if naming != "unique":
+            name = "paint" if naming == "duplicate" else None
         mesh = trimesh.creation.box()
         mesh.apply_translation([2 * index, 0, 0])
         mesh.visual = trimesh.visual.TextureVisuals(
@@ -81,7 +84,7 @@ def test_named_materials_keep_their_own_textures_and_colors(tmp_path, merge):
                 baseColorTexture=Image.new("RGB", (4, 4), rgb),
             ),
         )
-        scene.add_geometry(mesh, geom_name=name)
+        scene.add_geometry(mesh, geom_name=f"part_{index}")
     source = tmp_path / "paint.glb"
     scene.export(source)
     converter = glb_module.GLB2OBJConverter(
@@ -114,7 +117,10 @@ def test_named_materials_keep_their_own_textures_and_colors(tmp_path, merge):
 
 
 @pytest.mark.parametrize("merge", [False, True])
-def test_untextured_named_materials_export_their_diffuse_colors(tmp_path, merge):
+@pytest.mark.parametrize("naming", ["unique", "duplicate", "unnamed"])
+def test_untextured_named_materials_export_their_diffuse_colors(
+    tmp_path, merge, naming
+):
     import numpy as np
     import trimesh
 
@@ -126,7 +132,12 @@ def test_untextured_named_materials_export_their_diffuse_colors(tmp_path, merge)
         mesh.visual = trimesh.visual.TextureVisuals(
             uv=np.full((len(mesh.vertices), 2), 0.5),
             material=trimesh.visual.material.PBRMaterial(
-                name=f"paint_{index}", baseColorFactor=rgba
+                name=(
+                    f"paint_{index}"
+                    if naming == "unique"
+                    else "paint" if naming == "duplicate" else None
+                ),
+                baseColorFactor=rgba,
             ),
         )
         scene.add_geometry(mesh)
@@ -146,6 +157,43 @@ def test_untextured_named_materials_export_their_diffuse_colors(tmp_path, merge)
             mesh.visual.material.diffuse, expected[index], atol=1
         )
         assert mesh.visual.material.image is None
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_glb_display_names_cannot_become_obj_or_mtl_directives(tmp_path, merge):
+    import numpy as np
+    import trimesh
+
+    scene = trimesh.Scene()
+    for index, rgba in enumerate(([255, 0, 0, 255], [0, 0, 255, 255])):
+        mesh = trimesh.creation.box()
+        mesh.apply_translation([2 * index, 0, 0])
+        mesh.visual = trimesh.visual.TextureVisuals(
+            material=trimesh.visual.material.PBRMaterial(baseColorFactor=rgba)
+        )
+        scene.add_geometry(
+            mesh,
+            geom_name=f"part {index}\nusemtl wrong",
+            node_name=f"node {index}\nnewmtl wrong",
+        )
+    source = tmp_path / "names.glb"
+    scene.export(source)
+    converter = glb_module.GLB2OBJConverter(
+        str(tmp_path / "output"), merge_meshes=merge
+    )
+    assert converter.convert_glb_to_obj(source)
+    directory = tmp_path / "output/names"
+    for path in (directory / "names.obj", directory / "names.mtl"):
+        for line in path.read_text().splitlines():
+            if line.startswith(("g ", "usemtl ", "newmtl ")):
+                assert len(line.split()) == 2
+                assert line.split()[1].startswith("material_")
+    result = trimesh.load(directory / "names.obj", force="scene", process=False)
+    assert len(result.geometry) == 2
+    assert sum(len(mesh.faces) for mesh in result.geometry.values()) == 24
+    for mesh in result.geometry.values():
+        expected = [255, 0, 0] if mesh.vertices[:, 0].mean() < 1 else [0, 0, 255]
+        np.testing.assert_array_equal(mesh.visual.material.diffuse[:3], expected)
 
 
 def test_embedded_image_names_cannot_escape_the_output_directory(tmp_path):

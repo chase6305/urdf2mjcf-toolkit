@@ -164,6 +164,12 @@ class GLB2OBJConverter:
         )
         return f"scene_{digest}_{label}.png"
 
+    @staticmethod
+    def _obj_material_name(geometry_name: str) -> str:
+        # Display names may contain whitespace or OBJ/MTL line separators.
+        digest = hashlib.sha256(str(geometry_name).encode()).hexdigest()[:16]
+        return f"material_{digest}"
+
     def find_glb_files(self, input_path: str) -> list[Path]:
         """Find GLB files under an input path."""
         path = Path(input_path)
@@ -470,11 +476,11 @@ class GLB2OBJConverter:
 
     def _build_material_texture_mapping(
         self, gltf_data: dict[str, Any], texture_mapping: dict[str, str]
-    ) -> dict[str, dict[str, str]]:
-        """Build a material-to-texture-file mapping."""
+    ) -> dict[int, dict[str, str]]:
+        """Build texture bindings by glTF material index, never display name."""
         textures = gltf_data.get("textures", [])
         materials = gltf_data.get("materials", [])
-        material_texture_map: dict[str, dict[str, str]] = {}
+        material_texture_map: dict[int, dict[str, str]] = {}
 
         def resolve_texture(texture_index: int | None) -> str | None:
             if texture_index is None or texture_index >= len(textures):
@@ -485,21 +491,18 @@ class GLB2OBJConverter:
             return texture_mapping.get(f"texture_{source}")
 
         for idx, material in enumerate(materials):
-            material_name = material.get("name", f"material_{idx}")
-            material_texture_map[material_name] = {}
+            material_texture_map[idx] = {}
 
             pbr = material.get("pbrMetallicRoughness", {})
             diffuse = resolve_texture(pbr.get("baseColorTexture", {}).get("index"))
             if diffuse:
-                material_texture_map[material_name]["diffuse"] = diffuse
+                material_texture_map[idx]["diffuse"] = diffuse
 
             metallic_roughness = resolve_texture(
                 pbr.get("metallicRoughnessTexture", {}).get("index")
             )
             if metallic_roughness:
-                material_texture_map[material_name][
-                    "metallic_roughness"
-                ] = metallic_roughness
+                material_texture_map[idx]["metallic_roughness"] = metallic_roughness
 
             for key, alias in [
                 ("normalTexture", "normal"),
@@ -508,7 +511,7 @@ class GLB2OBJConverter:
             ]:
                 filename = resolve_texture(material.get(key, {}).get("index"))
                 if filename:
-                    material_texture_map[material_name][alias] = filename
+                    material_texture_map[idx][alias] = filename
 
         return material_texture_map
 
@@ -522,25 +525,31 @@ class GLB2OBJConverter:
         """Create an MTL material file and preserve base color when textures exist."""
         mtl_path = output_folder / f"{output_folder.name}.mtl"
 
-        material_texture_map: dict[str, dict[str, str]] = {}
+        material_texture_map: dict[int, dict[str, str]] = {}
         gltf_materials = []
         if gltf_data:
             material_texture_map = self._build_material_texture_mapping(
                 gltf_data, texture_mapping
             )
             gltf_materials = gltf_data.get("materials", [])
+        material_indices: dict[str, int | None] = {}
+        for idx, material in enumerate(gltf_materials):
+            name = material.get("name")
+            if name:
+                # Ambiguous names must use the geometry's actual loaded
+                # material, rather than another material's JSON entry.
+                material_indices[name] = None if name in material_indices else idx
 
         with open(mtl_path, "w", encoding="utf-8") as file_obj:
             file_obj.write("# Material file generated from GLB\n\n")
 
             for name, mesh in scene.geometry.items():
-                # Prefer the glTF material name, then fall back to a generated name.
                 visual = getattr(mesh, "visual", None)
                 material = getattr(visual, "material", None)
                 mesh_material_name = getattr(material, "name", None)
                 # Match the per-geometry usemtl emitted by the OBJ writer.
                 # glTF material names are optional and need not be unique.
-                material_name = f"material_{name}"
+                material_name = self._obj_material_name(name)
                 file_obj.write(f"newmtl {material_name}\n")
 
                 # Default material parameters.
@@ -551,12 +560,7 @@ class GLB2OBJConverter:
 
                 kd_written = False
                 texture_written = set()
-                gltf_idx = None
-                if mesh_material_name and gltf_materials:
-                    for idx, mat in enumerate(gltf_materials):
-                        if mat.get("name") == mesh_material_name:
-                            gltf_idx = idx
-                            break
+                gltf_idx = material_indices.get(mesh_material_name)
                 base_color = None
                 # Read material parameters from GLB/glTF when available.
                 if (
@@ -578,8 +582,8 @@ class GLB2OBJConverter:
                 file_obj.write(f"Ka {ka[0]:.6f} {ka[1]:.6f} {ka[2]:.6f}\n")
 
                 # Write all supported texture slots first.
-                if mesh_material_name and mesh_material_name in material_texture_map:
-                    textures = material_texture_map[mesh_material_name]
+                if gltf_idx is not None:
+                    textures = material_texture_map[gltf_idx]
                     if "diffuse" in textures:
                         file_obj.write(f"map_Kd {textures['diffuse']}\n")
                         texture_written.add("map_Kd")
@@ -665,8 +669,9 @@ class GLB2OBJConverter:
 
             for name, mesh in scene.geometry.items():
                 try:
-                    file_obj.write(f"g {name}\n")
-                    file_obj.write(f"usemtl material_{name}\n")
+                    material_name = self._obj_material_name(name)
+                    file_obj.write(f"g {material_name}\n")
+                    file_obj.write(f"usemtl {material_name}\n")
 
                     vertices = mesh.vertices
                     for vertex in vertices:
