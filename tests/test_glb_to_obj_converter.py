@@ -1,3 +1,8 @@
+import base64
+import builtins
+import io
+import json
+import struct
 import sys
 
 import pytest
@@ -144,9 +149,6 @@ def test_untextured_named_materials_export_their_diffuse_colors(tmp_path, merge)
 
 
 def test_embedded_image_names_cannot_escape_the_output_directory(tmp_path):
-    import json
-    import struct
-
     import numpy as np
     import trimesh
     from PIL import Image
@@ -189,3 +191,187 @@ def test_embedded_image_names_cannot_escape_the_output_directory(tmp_path):
     for filename in mapping.values():
         assert (destination / filename).resolve().is_relative_to(destination)
         assert (destination / filename).is_file()
+
+
+def _glb_bytes(metadata, chunks=()):
+    payload = json.dumps(metadata).encode()
+    payload += b" " * (-len(payload) % 4)
+    body = struct.pack("<I4s", len(payload), b"JSON") + payload
+    for kind, data in chunks:
+        body += struct.pack("<I4s", len(data), kind) + data
+    return struct.pack("<4sII", b"glTF", 2, 12 + len(body)) + body
+
+
+def _track_source_reads(monkeypatch, source):
+    requests = []
+    source_size = source.stat().st_size
+
+    class TrackedReader:
+        def __init__(self, file_obj):
+            self.file_obj = file_obj
+
+        def __getattr__(self, name):
+            return getattr(self.file_obj, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.file_obj.__exit__(*args)
+
+        def read(self, size=-1):
+            requests.append(size)
+            # Fail before a malformed chunk can trigger a large allocation.
+            assert 0 <= size <= source_size
+            return self.file_obj.read(size)
+
+    def tracked_open(path, mode="r", *args, **kwargs):
+        file_obj = builtins.open(path, mode, *args, **kwargs)  # noqa: SIM115
+        return TrackedReader(file_obj) if path == source and mode == "rb" else file_obj
+
+    monkeypatch.setattr(glb_module, "open", tracked_open, raising=False)
+    return requests
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "short_header",
+        "wrong_magic",
+        "old_version",
+        "wrong_total_length",
+        "huge_json_length",
+        "unaligned_length",
+        "wrong_first_chunk",
+        "duplicate_json",
+        "duplicate_bin",
+        "late_bin",
+        "short_chunk_header",
+        "huge_bin_length",
+        "json_array",
+    ],
+)
+def test_invalid_glb_is_rejected_before_mesh_loading(tmp_path, monkeypatch, corruption):
+    data = bytearray(_glb_bytes({"asset": {"version": "2.0"}}))
+    if corruption == "short_header":
+        data = data[:7]
+    elif corruption == "wrong_magic":
+        data[:4] = b"FAIL"
+    elif corruption == "old_version":
+        struct.pack_into("<I", data, 4, 1)
+    elif corruption == "wrong_total_length":
+        struct.pack_into("<I", data, 8, len(data) + 4)
+    elif corruption == "huge_json_length":
+        struct.pack_into("<I", data, 12, 0xFFFFFFFC)
+    elif corruption == "unaligned_length":
+        struct.pack_into("<I", data, 12, len(data) - 21)
+    elif corruption == "wrong_first_chunk":
+        data[16:20] = b"BIN\0"
+    elif corruption == "duplicate_json":
+        data = _glb_bytes({}, [(b"JSON", b"{}  ")])
+    elif corruption == "duplicate_bin":
+        data = _glb_bytes({}, [(b"BIN\0", b"\0" * 4)] * 2)
+    elif corruption == "late_bin":
+        data = _glb_bytes({}, [(b"EXTN", b"\0" * 4), (b"BIN\0", b"\0" * 4)])
+    elif corruption == "short_chunk_header":
+        data += b"abcd"
+        struct.pack_into("<I", data, 8, len(data))
+    elif corruption == "huge_bin_length":
+        data += struct.pack("<I4s", 0xFFFFFFFC, b"BIN\0")
+        struct.pack_into("<I", data, 8, len(data))
+    elif corruption == "json_array":
+        data = _glb_bytes([])
+    source = tmp_path / "bad.glb"
+    source.write_bytes(data)
+    requests = _track_source_reads(monkeypatch, source)
+    converter = glb_module.GLB2OBJConverter(str(tmp_path / "output"))
+    loads = []
+    monkeypatch.setattr(converter.trimesh, "load", lambda *args: loads.append(args))
+    assert not converter.convert_glb_to_obj(source)
+    assert loads == []
+    assert all(0 <= size <= len(data) for size in requests)
+    assert not list((tmp_path / "output").rglob("*.obj"))
+
+
+def test_texture_extraction_reads_only_the_image_range(tmp_path, monkeypatch):
+    from PIL import Image
+
+    image = io.BytesIO()
+    Image.new("RGB", (2, 2), "red").save(image, format="PNG")
+    image_bytes = image.getvalue()
+    bin_length = 8 * 1024 * 1024
+    image_offset = bin_length - 1024
+    metadata = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": bin_length}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": image_offset, "byteLength": len(image_bytes)}
+        ],
+        "images": [{"bufferView": 0, "mimeType": "image/png"}],
+    }
+    prefix = bytearray(_glb_bytes(metadata))
+    total_length = len(prefix) + 8 + bin_length + 12
+    struct.pack_into("<I", prefix, 8, total_length)
+    source = tmp_path / "sparse.glb"
+    with source.open("wb") as file_obj:
+        file_obj.write(prefix)
+        file_obj.write(struct.pack("<I4s", bin_length, b"BIN\0"))
+        file_obj.seek(image_offset, 1)
+        file_obj.write(image_bytes)
+        file_obj.seek(len(prefix) + 8 + bin_length)
+        # Unknown extension chunks after the BIN chunk are legal and are skipped.
+        file_obj.write(struct.pack("<I4s", 4, b"EXTN") + b"test")
+    requests = _track_source_reads(monkeypatch, source)
+    destination = tmp_path / "output"
+    converter = glb_module.GLB2OBJConverter(str(destination))
+    mapping, parsed = converter.extract_textures_from_glb(source, destination)
+    assert parsed == metadata
+    assert (destination / mapping["texture_0"]).read_bytes() == image_bytes
+    assert sum(requests) < 2048  # Not the 8 MiB BIN payload.
+    assert max(requests) < 1024
+
+
+@pytest.mark.parametrize("invalid_range", ["negative", "padding", "overflow", "index"])
+def test_embedded_image_ranges_must_stay_within_the_buffer(tmp_path, invalid_range):
+    view = {"buffer": 0, "byteLength": 3}
+    image = {"bufferView": 0, "mimeType": "image/png"}
+    if invalid_range == "negative":
+        view["byteOffset"] = -1
+    elif invalid_range == "padding":
+        view["byteLength"] = 4
+    elif invalid_range == "overflow":
+        view["byteLength"] = 1 << 32
+    else:
+        image["bufferView"] = -1
+    source = tmp_path / "bad.glb"
+    source.write_bytes(
+        _glb_bytes(
+            {"buffers": [{"byteLength": 3}], "bufferViews": [view], "images": [image]},
+            [(b"BIN\0", b"abcd")],
+        )
+    )
+    destination = tmp_path / "output"
+    converter = glb_module.GLB2OBJConverter(str(destination))
+    assert converter.extract_textures_from_glb(source, destination) == ({}, None)
+    assert list(destination.iterdir()) == []
+
+
+def test_data_uri_and_external_buffer_images_do_not_read_the_bin_chunk(tmp_path):
+    image_bytes = b"embedded PNG bytes"
+    metadata = {
+        "buffers": [{"byteLength": 4}, {"uri": "external.bin", "byteLength": 4}],
+        "bufferViews": [{"buffer": 1, "byteLength": 4}],
+        "images": [
+            {"bufferView": 0, "mimeType": "image/png"},
+            {"uri": "data:image/png;base64," + base64.b64encode(image_bytes).decode()},
+        ],
+    }
+    source = tmp_path / "source.glb"
+    # Use an aligned BIN chunk; the external buffer's same range must be ignored.
+    source.write_bytes(_glb_bytes(metadata, [(b"BIN\0", b"data")]))
+    destination = tmp_path / "output"
+    converter = glb_module.GLB2OBJConverter(str(destination))
+    mapping, parsed = converter.extract_textures_from_glb(source, destination)
+    assert parsed == metadata
+    assert mapping == {"texture_1": "texture_001.png"}
+    assert (destination / mapping["texture_1"]).read_bytes() == image_bytes

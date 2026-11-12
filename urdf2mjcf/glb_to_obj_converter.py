@@ -30,7 +30,7 @@ import os
 import struct
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
@@ -66,6 +66,58 @@ def check_dependencies():
         )
 
     return trimesh, np, Image
+
+
+def _read_glb_layout(
+    file_obj: BinaryIO,
+) -> tuple[dict[str, Any], tuple[int, int] | None]:
+    """Validate the GLB container and locate its JSON and optional BIN chunk.
+
+    Check every declared range against the actual file before reading it. The
+    BIN payload is left on disk; texture extraction only reads image ranges.
+    """
+    file_obj.seek(0, os.SEEK_END)
+    file_size = file_obj.tell()
+    file_obj.seek(0)
+    if file_size < 20:
+        raise ValueError("Truncated GLB header or JSON chunk")
+    magic, version, total_length = struct.unpack("<4sII", file_obj.read(12))
+    if magic != b"glTF" or version != 2:
+        raise ValueError("Expected a GLB version 2 file")
+    if total_length != file_size:
+        raise ValueError("GLB declared length does not match its file size")
+
+    metadata = None
+    binary_chunk = None
+    chunk_index = 0
+    while file_obj.tell() < file_size:
+        if file_size - file_obj.tell() < 8:
+            raise ValueError("Truncated GLB chunk header")
+        chunk_length, chunk_type = struct.unpack("<I4s", file_obj.read(8))
+        start = file_obj.tell()
+        if chunk_length % 4 or chunk_length > file_size - start:
+            raise ValueError("Invalid GLB chunk length")
+        if chunk_index == 0 and chunk_type != b"JSON":
+            raise ValueError("The first GLB chunk must contain JSON")
+        if chunk_type == b"JSON":
+            if chunk_index != 0:
+                raise ValueError("GLB must contain exactly one JSON chunk")
+            payload = file_obj.read(chunk_length)
+            if len(payload) != chunk_length:
+                raise ValueError("Truncated GLB JSON payload")
+            metadata = json.loads(payload.decode("utf-8"))
+            if not isinstance(metadata, dict):
+                raise ValueError("GLB JSON must contain an object")
+        elif chunk_type == b"BIN\x00":
+            if chunk_index != 1 or binary_chunk is not None:
+                raise ValueError("GLB BIN chunk must occur once, as the second chunk")
+            binary_chunk = (start, chunk_length)
+        # Unknown chunk types are allowed; skip their payload without reading it.
+        file_obj.seek(start + chunk_length)
+        chunk_index += 1
+    if metadata is None:
+        raise ValueError("GLB JSON chunk is missing")
+    return metadata, binary_chunk
 
 
 class GLB2OBJConverter:
@@ -308,83 +360,75 @@ class GLB2OBJConverter:
     def extract_textures_from_glb(
         self, glb_path: Path, output_folder: Path
     ) -> tuple[dict[str, str], dict[str, Any] | None]:
-        """Extract embedded texture bytes directly from a GLB file."""
+        """Extract embedded images without loading the complete binary buffer."""
         texture_mapping: dict[str, str] = {}
         gltf_data: dict[str, Any] | None = None
 
         try:
             with open(glb_path, "rb") as file_obj:
-                magic = file_obj.read(4)
-                if magic != b"glTF":
-                    self.logger.warning("Invalid GLB file")
-                    return texture_mapping, gltf_data
-
-                version = struct.unpack("<I", file_obj.read(4))[0]
-                total_length = struct.unpack("<I", file_obj.read(4))[0]
-                self.logger.debug(f"GLB version: {version}, length: {total_length}")
-
-                json_chunk_length = struct.unpack("<I", file_obj.read(4))[0]
-                json_chunk_type = file_obj.read(4)
-                if json_chunk_type != b"JSON":
-                    self.logger.warning("JSON chunk not found")
-                    return texture_mapping, gltf_data
-
-                json_data = file_obj.read(json_chunk_length).decode("utf-8")
-                gltf_data = json.loads(json_data)
-
-                bin_data = None
-                if file_obj.tell() < total_length:
-                    bin_chunk_length = struct.unpack("<I", file_obj.read(4))[0]
-                    bin_chunk_type = file_obj.read(4)
-                    if bin_chunk_type == b"BIN\x00":
-                        bin_data = file_obj.read(bin_chunk_length)
+                gltf_data, binary_chunk = _read_glb_layout(file_obj)
+                buffers = gltf_data.get("buffers", [])
+                embedded_buffer = buffers and "uri" not in buffers[0]
+                buffer_length = 0
+                if embedded_buffer:
+                    buffer_length = buffers[0]["byteLength"]
+                    if (
+                        type(buffer_length) is not int
+                        or buffer_length < 0
+                        or binary_chunk is None
+                        or buffer_length > binary_chunk[1]
+                    ):
+                        raise ValueError("GLB embedded buffer exceeds its BIN chunk")
 
                 for i, image_info in enumerate(gltf_data.get("images", [])):
-                    try:
-                        if "bufferView" in image_info:
-                            buffer_view_idx = image_info["bufferView"]
-                            buffer_view = gltf_data["bufferViews"][buffer_view_idx]
-                            start = buffer_view.get("byteOffset", 0)
-                            byte_length = buffer_view["byteLength"]
-
-                            if bin_data and start + byte_length <= len(bin_data):
-                                image_data = bin_data[start : start + byte_length]
-                                mime_type = image_info.get("mimeType", "image/png")
-                                ext = "png" if "png" in mime_type else "jpg"
-                                texture_filename = f"texture_{i:03d}.{ext}"
-                                texture_path = output_folder / texture_filename
-                                with open(texture_path, "wb") as img_file:
-                                    img_file.write(image_data)
-                                texture_mapping[f"texture_{i}"] = texture_filename
-                                self.logger.info(
-                                    f"Extracted texture: {texture_filename} ({len(image_data)} bytes)"
-                                )
-
-                        elif "uri" in image_info:
-                            uri = image_info["uri"]
-                            if uri.startswith("data:"):
-                                header, data = uri.split(",", 1)
-                                image_data = base64.b64decode(data)
-                                mime_type = header.split(";")[0].split(":")[1]
-                                ext = "png" if "png" in mime_type else "jpg"
-                                texture_filename = f"texture_{i:03d}.{ext}"
-                                texture_path = output_folder / texture_filename
-                                with open(texture_path, "wb") as img_file:
-                                    img_file.write(image_data)
-                                texture_mapping[f"texture_{i}"] = texture_filename
-                                self.logger.info(
-                                    f"Extracted texture: {texture_filename} (data URI)"
-                                )
-
-                    except (
-                        Exception
-                    ) as exc:  # pragma: no cover - best effort extraction
-                        self.logger.warning(f"Failed to extract texture {i}: {exc}")
+                    if "bufferView" in image_info:
+                        index = image_info["bufferView"]
+                        views = gltf_data.get("bufferViews", [])
+                        if type(index) is not int or not 0 <= index < len(views):
+                            raise ValueError(f"Invalid bufferView for image {i}")
+                        view = views[index]
+                        if view["buffer"] != 0 or not embedded_buffer:
+                            # External buffers are loaded by trimesh, not the GLB BIN chunk.
+                            continue
+                        start = view.get("byteOffset", 0)
+                        length = view["byteLength"]
+                        if (
+                            type(start) is not int
+                            or type(length) is not int
+                            or start < 0
+                            or length <= 0
+                            or start + length > buffer_length
+                        ):
+                            raise ValueError(f"Image {i} exceeds the embedded buffer")
+                        assert binary_chunk is not None
+                        file_obj.seek(binary_chunk[0] + start)
+                        image_data = file_obj.read(length)
+                        if len(image_data) != length:
+                            raise ValueError(f"Truncated image {i} in GLB")
+                        mime_type = image_info.get("mimeType", "image/png")
+                    elif image_info.get("uri", "").startswith("data:"):
+                        header, data = image_info["uri"].split(",", 1)
+                        if not header.endswith(";base64"):
+                            raise ValueError(f"Unsupported image data URI {i}")
+                        image_data = base64.b64decode(data, validate=True)
+                        mime_type = header.split(";", 1)[0].split(":", 1)[1]
+                    else:
+                        continue
+                    ext = "png" if "png" in mime_type else "jpg"
+                    texture_filename = f"texture_{i:03d}.{ext}"
+                    texture_path = output_folder / texture_filename
+                    with open(texture_path, "wb") as img_file:
+                        img_file.write(image_data)
+                    texture_mapping[f"texture_{i}"] = texture_filename
+                    self.logger.info(
+                        f"Extracted texture: {texture_filename} ({len(image_data)} bytes)"
+                    )
 
             self.logger.info(f"Extracted {len(texture_mapping)} textures from GLB")
 
         except Exception as exc:
             self.logger.warning(f"Failed to extract textures directly from GLB: {exc}")
+            return {}, None
 
         return texture_mapping, gltf_data
 
@@ -700,6 +744,8 @@ class GLB2OBJConverter:
             texture_mapping, gltf_data = self.extract_textures_from_glb(
                 glb_path, output_folder
             )
+            if gltf_data is None:
+                raise ValueError("Invalid GLB container or embedded image data")
 
             scene = self.trimesh.load(str(glb_path))
 
