@@ -281,6 +281,8 @@ The output `meshes/` directory must not contain the input URDF or a referenced s
 
 DAE conversion falls back to trimesh/pycollada when Blender is unavailable or its Collada importer fails. Scene transforms are applied before meshes are merged.
 
+DAE fallback applies the document's `unit meter` and `up_axis`, producing meter-based Z-up geometry. 3MF declared units, including the default millimeter, are converted to meters. Node translations are normalized together with vertices; URDF mesh scale and geometry origins are applied afterward. Direct mesh inertia calculation and automatic recovery use these same unit/frame conventions. Invalid unit declarations fail explicitly.
+
 GLB conversion merges compatible material instances and retains distinct material groups in the same OBJ. `--no-merge` preserves every geometry group. Named materials, solid diffuse colors, and each material's base-color texture keep separate bindings; extracted image names are generated locally rather than used as paths. Explicit MJCF colors and texture bindings take precedence over filename-based texture discovery. This does not reproduce the complete glTF PBR shading model.
 
 Named URDF color materials remain attached to each visual instance, including every part produced by mesh material splitting. A color material that shares a mesh material's generated name is renamed with all of its references. Visuals without an explicit URDF color continue to use converted mesh materials.

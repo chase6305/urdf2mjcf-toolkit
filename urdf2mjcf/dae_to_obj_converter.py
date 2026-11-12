@@ -17,6 +17,7 @@ from typing import Any
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
+from urdf2mjcf.mesh_units import normalize_mesh_asset
 
 
 def _output_signature(path: Path) -> tuple[int, int, int, int] | None:
@@ -52,7 +53,7 @@ class DAE2OBJConverter:
 
         try:
             mesh = MeshToOBJConverter._as_single_mesh(
-                trimesh.load(dae_file, process=False)
+                normalize_mesh_asset(trimesh.load(dae_file, process=False), dae_file)
             )
             output_dir.mkdir(parents=True, exist_ok=True)
             output = output_dir / f"{dae_file.stem}.obj"

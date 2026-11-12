@@ -20,6 +20,7 @@ except ImportError:
 
 from urdf2mjcf.asset_paths import MeshPathResolver
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.mesh_units import normalize_mesh_asset
 from urdf2mjcf.physics import (
     numbers,
     origin_transform,
@@ -93,7 +94,8 @@ class URDFInertiaCalculator:
     def _mesh_properties(self, mesh_path: Path, scale=1.0) -> dict:
         if not TRIMESH_AVAILABLE:
             raise RuntimeError("Trimesh is required for mesh inertia calculation")
-        mesh = trimesh.load(mesh_path)
+        mesh_path = Path(mesh_path)
+        mesh = normalize_mesh_asset(trimesh.load(mesh_path), mesh_path)
         if isinstance(mesh, trimesh.Scene):
             mesh = mesh.to_mesh()
         if not isinstance(mesh, trimesh.Trimesh):

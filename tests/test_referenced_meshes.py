@@ -89,8 +89,19 @@ def test_external_formats_convert_once_and_preserve_visual_collision_scale(
         visual = (
             model.geom_contype[geom_id] == 0 and model.geom_conaffinity[geom_id] == 0
         )
-        center = np.array([0.34, 0.43, 0.54] if visual else [0.02, 0.03, 0.04])
-        half = np.array([0.1, 0.1, 0.15] if visual else [0.05, 0.1, 0.15])
+        center = np.array([0.02, 0.03, 0.04])
+        half = np.array([0.05, 0.1, 0.15])
+        if mesh_format == "dae":
+            # Trimesh's DAE exporter declares Y_UP; Blender maps it into Z-up.
+            center = np.array([0.02, -0.04, 0.03])
+            half = np.array([0.05, 0.15, 0.1])
+        elif mesh_format == "3mf":
+            # Its 3MF exporter declares millimeters for these numeric vertices.
+            center *= 0.001
+            half *= 0.001
+        if visual:
+            center = center * [2, 1, 1] + [0.3, 0.4, 0.5]
+            half *= [2, 1, 1]
         np.testing.assert_allclose(
             _bounds_in_body(model, data, geom_id),
             [center - half, center + half],

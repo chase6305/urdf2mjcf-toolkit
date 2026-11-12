@@ -64,6 +64,19 @@ def test_empty_mesh_is_rejected():
         MeshToOBJConverter._as_single_mesh(trimesh.Trimesh())
 
 
+def test_nonfinite_mesh_vertices_are_rejected():
+    import numpy as np
+    import trimesh
+
+    mesh = trimesh.Trimesh(
+        vertices=[[0, 0, 0], [1, 0, 0], [0, np.inf, 0]],
+        faces=[[0, 1, 2]],
+        process=False,
+    )
+    with pytest.raises(ValueError, match="finite coordinates"):
+        MeshToOBJConverter._as_single_mesh(mesh)
+
+
 def test_output_cannot_overwrite_source(tmp_path):
     source = tmp_path / "triangle.stl"
     source.write_text(ASCII_STL)
