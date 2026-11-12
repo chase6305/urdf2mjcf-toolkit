@@ -56,3 +56,11 @@ jobs:
 
       - name: Build wheel
         run: python -m pip wheel --no-deps --wheel-dir dist .
+
+      - name: Verify installed wheel outside the checkout
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-smoke-venv"
+          "$RUNNER_TEMP/wheel-smoke-venv/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-smoke-venv/bin/python" -I "$GITHUB_WORKSPACE/tests/installed_cli_smoke.py"
