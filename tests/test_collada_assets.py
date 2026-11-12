@@ -1,12 +1,14 @@
 """DAE fallback geometry and inertia must use the same declared asset frame."""
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import mujoco
 import numpy as np
 import pytest
 import trimesh
 
+from urdf2mjcf.collada_assets import normalize_collada_asset
 from urdf2mjcf.dae_to_obj_converter import DAE2OBJConverter
 from urdf2mjcf.urdf_inertia_calculator import URDFInertiaCalculator
 from urdf2mjcf.urdf_to_mujoco_converter import MujocoConversionManager
@@ -167,3 +169,87 @@ def test_invalid_dae_units_do_not_replace_an_existing_obj(tmp_path, unit):
     assert not success
     assert outputs == []
     assert obj.read_bytes() == b"previous valid OBJ"
+
+
+def test_missing_unit_and_up_axis_use_collada_defaults(tmp_path):
+    source, vertices = _dae(tmp_path, unit=1, up_axis="Y_UP")
+    tree = ET.parse(source)
+    asset = tree.find(f"{NS}asset")
+    for tag in ("unit", "up_axis"):
+        asset.remove(asset.find(NS + tag))
+    tree.write(source)
+
+    success, outputs = DAE2OBJConverter()._convert_with_trimesh(
+        source, tmp_path / "output", preserve_textures=True
+    )
+
+    assert success
+    actual = trimesh.load(outputs[0], force="mesh", process=False)
+    expected = _expected_vertices(vertices, 1, "Y_UP")
+    np.testing.assert_allclose(
+        actual.bounds, [expected.min(axis=0), expected.max(axis=0)]
+    )
+
+
+@pytest.mark.parametrize("tag", ["unit", "up_axis"])
+def test_ambiguous_asset_conventions_preserve_existing_obj(tmp_path, tag):
+    source, _ = _dae(tmp_path)
+    tree = ET.parse(source)
+    asset = tree.find(f"{NS}asset")
+    asset.append(ET.fromstring(ET.tostring(asset.find(NS + tag))))
+    tree.write(source)
+    output = tmp_path / "output"
+    output.mkdir()
+    existing = output / "body.obj"
+    existing.write_bytes(b"previous valid OBJ")
+
+    success, outputs = DAE2OBJConverter()._convert_with_trimesh(
+        source, output, preserve_textures=True
+    )
+
+    assert not success
+    assert outputs == []
+    assert existing.read_bytes() == b"previous valid OBJ"
+
+
+def test_asset_header_reader_does_not_read_large_geometry_tail(tmp_path, monkeypatch):
+    source = tmp_path / "large.dae"
+    with source.open("wb") as stream:
+        stream.write(
+            b'<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">'
+            b"<asset><created>2026-11-13T00:00:00Z</created><modified>2026-11-13T00:00:00Z</modified>"
+            b'<unit meter="0.001"/><up_axis>Z_UP</up_axis></asset><!--'
+        )
+        for _ in range(128):
+            stream.write(b" " * (64 * 1024))
+        stream.write(b"--></COLLADA>")
+    consumed = []
+    original_open = Path.open
+
+    class Counted:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def read(self, size=-1):
+            chunk = self.stream.read(size)
+            consumed.append(len(chunk))
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+    def opened(self, *args, **kwargs):
+        stream = original_open(self, *args, **kwargs)
+        return Counted(stream) if self == source else stream
+
+    monkeypatch.setattr(Path, "open", opened)
+    mesh = trimesh.creation.box(extents=[100, 200, 300])
+
+    normalize_collada_asset(mesh, source)
+
+    np.testing.assert_allclose(mesh.extents, [0.1, 0.2, 0.3])
+    assert source.stat().st_size > 8 * 1024**2
+    assert 0 < sum(consumed) <= 64 * 1024
