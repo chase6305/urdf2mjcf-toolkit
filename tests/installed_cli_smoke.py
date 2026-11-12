@@ -16,8 +16,8 @@ import trimesh
 import urdf2mjcf.mesh_identity
 
 
-def _run_cli(*args, expected=0):
-    executable = Path(sys.executable).parent / "urdf2mjcf-toolkit"
+def _run_cli(*args, expected=0, command="urdf2mjcf-toolkit"):
+    executable = Path(sys.executable).parent / command
     result = subprocess.run(
         [str(executable), *map(str, args)], capture_output=True, text=True, timeout=90
     )
@@ -130,12 +130,55 @@ def main():
             relocated = root / f"relocated-{backend}"
             shutil.copytree(output, relocated)
             shutil.rmtree(output)
-            results.append((relocated, model, report["assets"]))
+            results.append((relocated, "robot.xml", model, report["assets"]))
 
         assert _files(inputs) == original_inputs
+        (inputs / "copy.urdf").write_bytes(original_source)
+        batch_output = root / "batch"
+        batch_report = root / "batch.json"
+        batch_arguments = (
+            inputs,
+            batch_output,
+            "--backend",
+            "mujoco",
+            "--no-inertia-recalc",
+            "--report",
+            batch_report,
+        )
+        _run_cli(*batch_arguments, command="urdf2mjcf-batch")
+        report = json.loads(batch_report.read_text())
+        assert report["summary"] == {
+            "total": 2,
+            "succeeded": 2,
+            "failed": 0,
+            "skipped": 0,
+        }
+        successful = report["results"]
+        previous_batch = _files(batch_output)
+        (inputs / "broken.urdf").write_text("invalid XML")
+        batch_inputs = _files(inputs)
+        _run_cli(*batch_arguments, command="urdf2mjcf-batch", expected=1)
+        report = json.loads(batch_report.read_text())
+        assert report["summary"] == {
+            "total": 3,
+            "succeeded": 2,
+            "failed": 1,
+            "skipped": 0,
+        }
+        assert _files(batch_output) == previous_batch
+        assert _files(inputs) == batch_inputs
+        for result in successful:
+            output_xml = Path(result["output"])
+            model = mujoco.MjModel.from_xml_path(str(output_xml))
+            assert model.nv == 1 and model.nmesh == 2
+            np.testing.assert_allclose(model.body("arm").mass, [2])
+            relocated = root / f"relocated-batch-{output_xml.stem}"
+            shutil.copytree(output_xml.parent, relocated)
+            results.append((relocated, output_xml.name, model, result["assets"]))
+        shutil.rmtree(batch_output)
         shutil.rmtree(inputs)
-        for relocated, original, assets in results:
-            model = mujoco.MjModel.from_xml_path(str(relocated / "robot.xml"))
+        for relocated, filename, original, assets in results:
+            model = mujoco.MjModel.from_xml_path(str(relocated / filename))
             for name in (
                 "mesh_vert",
                 "mesh_face",
@@ -152,7 +195,7 @@ def main():
                 assert path.stat().st_size == asset["size_bytes"]
                 assert hashlib.sha256(path.read_bytes()).hexdigest() == asset["sha256"]
     print(
-        "Installed wheel: both CLI backends, physics, failure preservation, and relocation passed."
+        "Installed wheel: both single-model backends, batch CLI, physics, failure preservation, and relocation passed."
     )
 
 
