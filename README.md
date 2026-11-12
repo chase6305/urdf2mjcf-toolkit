@@ -119,6 +119,8 @@ urdf2mjcf-toolkit robot.urdf ./output --backend auto --report ./reports/conversi
 
 Repeated singleton declarations such as two inertias, axes, limits, origins, or geometry elements fail with `ambiguous_definition`; the inertia calculator also refuses to rewrite such inputs. Origins must use `xyz`/`rpy`: `quat_xyzw` is currently rejected explicitly. Finite, nonzero joint axes are normalized before import regardless of magnitude. A positive effort limit clamps total joint actuator force; a zero effort limit keeps the passive degree of freedom and clamps every generated actuator's force to zero.
 
+Conversion checks XML, topology, and physical declarations before copying or converting mesh assets. Fatal declarations stop at `input_validation`; the report includes their diagnostic `issues`. With automatic inertia recovery enabled, invalid inertia definitions continue to the selective repair flow. Disabling recovery rejects them before asset work as well.
+
 Checks do not invoke converters or create the conversion output directory. Mesh contents, textures, inferred inertias, and compiled dynamics still require conversion and MuJoCo validation; a passing check does not guarantee a successful conversion. Velocity limits produce a `velocity_limit_unenforced` warning because they require controller enforcement. Warnings alone keep the check status `passed` and exit code `0`. Conversion-only options are ignored in check mode; the requested backend is recorded as context.
 
 `--report` optionally saves JSON on success or failure. Conversion reports contain the requested/used backend, per-backend attempts and errors, failure stage, elapsed time, options, inertia recovery attempt count, and statistics from the validated model. Body counts exclude the world body; geometry counts include the generated floor. Check reports contain issues with codes and mesh references with resolved paths. Reports use `schema_version: 1`; check status is `passed`/`failed`, conversion status is `success`/`failed`. Exit code is `0` on success, `1` on a check, conversion, or report-writing failure (`2` for invalid CLI syntax). Report paths must end in `.json`; the input cannot be overwritten. Existing reports are replaced atomically.
@@ -244,15 +246,16 @@ python kit/visualize_mujoco.py output/robot.xml
 
 ## Conversion Workflow
 
-1. Copy visual assets, and collision assets when requested.
-2. Convert supported mesh formats in the staged asset directories to OBJ.
-3. Resolve URDF visual/collision references and convert remaining DAE, GLB, PLY, OFF, and 3MF sources to OBJ.
-4. Stage the URDF so mesh paths resolve correctly during backend conversion.
-5. Convert URDF to MJCF with the selected backend, optionally retrying inertia errors after recalculation.
-6. Run `obj2mjcf` over generated OBJ folders for the default backend; native conversion uses meshes directly.
-7. Edit the final MJCF to normalize compiler paths, materials, textures, mesh variants, default geom classes, and base behavior.
-8. Collect final MJCF file dependencies into the output asset tree and rewrite them as relative paths.
-9. Compile the exact final XML with MuJoCo, then publish that XML and its assets together.
+1. Check XML, topology, and physical declarations before asset work.
+2. Copy visual assets, and collision assets when requested.
+3. Convert supported mesh formats in the staged asset directories to OBJ.
+4. Resolve URDF visual/collision references and convert remaining DAE, GLB, PLY, OFF, and 3MF sources to OBJ.
+5. Stage the URDF so mesh paths resolve correctly during backend conversion.
+6. Convert URDF to MJCF with the selected backend, optionally retrying inertia errors after recalculation.
+7. Run `obj2mjcf` over generated OBJ folders for the default backend; native conversion uses meshes directly.
+8. Edit the final MJCF to normalize compiler paths, materials, textures, mesh variants, default geom classes, and base behavior.
+9. Collect final MJCF file dependencies into the output asset tree and rewrite them as relative paths.
+10. Compile the exact final XML with MuJoCo, then publish that XML and its assets together.
 
 Supported layouts include `visual/`, `meshes/visual/`, and `urdf/robot.urdf` alongside `meshes/visual/`, with equivalent collision layouts. Mesh references may use relative paths, absolute paths, `file://`, or `package://` references resolvable in the local directory hierarchy. Converted OBJ files take precedence; ambiguous filenames produce an explicit error.
 

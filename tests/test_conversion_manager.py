@@ -156,7 +156,7 @@ def test_output_inside_source_assets_is_rejected_before_creation(tmp_path):
 @pytest.mark.parametrize("format_name", ["DAE", "GLB", "STL"])
 def test_failed_mesh_stage_aborts_pipeline(tmp_path, monkeypatch, format_name):
     source = tmp_path / "robot.urdf"
-    source.write_text('<robot name="test" />')
+    source.write_text('<robot name="test"><link name="base"/></robot>')
     manager = MujocoConversionManager(source, tmp_path / "output")
     monkeypatch.setattr(
         manager_module.DAE2OBJConverter,
@@ -181,7 +181,7 @@ def test_failed_mesh_stage_aborts_pipeline(tmp_path, monkeypatch, format_name):
 
 def test_invalid_final_model_does_not_replace_previous_xml(tmp_path, monkeypatch):
     source = tmp_path / "robot.urdf"
-    source.write_text('<robot name="test" />')
+    source.write_text('<robot name="test"><link name="base"/></robot>')
     manager = MujocoConversionManager(source, tmp_path / "output")
     output = manager.output_dir / "robot.xml"
     output.write_text("previous successful model")
@@ -303,3 +303,62 @@ def test_disabled_recovery_rejects_invalid_inertia_before_import(tmp_path, monke
         manager.run()
     assert manager.last_report["inertia_recovery_attempts"] == 0
     assert manager.last_report["inertia_recoveries"] == []
+
+
+@pytest.mark.parametrize(
+    "xml, error, recalculate",
+    [
+        ("invalid XML", "Cannot parse URDF", True),
+        ("<mujoco/>", "root element", True),
+        ('<robot><link name="a"/><link name="b"/></robot>', "invalid_roots", True),
+        (
+            '<robot><link name="a"><visual><geometry><box size="-1 2 3"/>'
+            "</geometry></visual></link></robot>",
+            "invalid_geometry",
+            True,
+        ),
+        (
+            '<robot><link name="a"><inertial/><inertial/></link></robot>',
+            "ambiguous_definition",
+            True,
+        ),
+        (
+            '<robot><link name="a"><inertial><mass value="1"/>'
+            '<inertia ixx="0" iyy="0" izz="0"/></inertial></link></robot>',
+            "invalid_inertia",
+            False,
+        ),
+    ],
+)
+def test_invalid_input_never_starts_asset_work(
+    tmp_path, monkeypatch, xml, error, recalculate
+):
+    source = tmp_path / "robot.urdf"
+    source.write_text(xml)
+    original = source.read_bytes()
+    manager = MujocoConversionManager(
+        source,
+        tmp_path / "output",
+        backend="auto",
+        auto_recalculate_inertia=recalculate,
+    )
+    output = manager.output_dir / "robot.xml"
+    output.write_bytes(b"previous model")
+    asset = manager.visual_output_dir / "original.obj"
+    asset.write_bytes(b"previous mesh")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid input started copying or converting assets")
+
+    monkeypatch.setattr(manager, "_copy_tree", forbidden)
+    monkeypatch.setattr(manager, "_convert_mesh_directory", forbidden)
+    monkeypatch.setattr(manager, "_run_backend", forbidden)
+    with pytest.raises(RuntimeError, match=error):
+        manager.run()
+    assert manager.last_report["stage"] == "input_validation"
+    assert manager.last_report["attempts"] == []
+    assert manager.last_report["inertia_recovery_attempts"] == 0
+    assert output.read_bytes() == b"previous model"
+    assert asset.read_bytes() == b"previous mesh"
+    assert source.read_bytes() == original
+    assert not list(manager.output_dir.glob("urdf2mjcf-work-*"))

@@ -90,10 +90,15 @@ def test_explicit_backend_does_not_switch_on_error(tmp_path, monkeypatch):
     assert not (manager.output_dir / "robot.xml").exists()
 
 
-def test_all_backend_failures_preserve_previous_result(tmp_path):
+def test_all_backend_failures_preserve_previous_result(tmp_path, monkeypatch):
     manager = _manager(tmp_path, "auto")
-    # Valid XML reaches backend selection; malformed XML now fails discovery first.
-    manager.urdf_path.write_text("<invalid_model/>")
+
+    def failed_convert(converter):
+        converter.last_error = "forced backend failure"
+        return False
+
+    monkeypatch.setattr(manager_module.URDF2MJCFConverter, "convert", failed_convert)
+    monkeypatch.setattr(manager_module.NativeMujocoConverter, "convert", failed_convert)
     output = manager.output_dir / "robot.xml"
     output.write_text("previous result")
     with pytest.raises(

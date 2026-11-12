@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from tqdm import tqdm
@@ -25,6 +26,11 @@ from urdf2mjcf.referenced_meshes import preprocess_referenced_meshes
 from urdf2mjcf.reporting import new_report, validate_report_path, write_report
 from urdf2mjcf.urdf_inertia_calculator import URDFInertiaCalculator
 from urdf2mjcf.urdf_to_mjcf_converter import URDF2MJCFConverter, URDFConverterBase
+from urdf2mjcf.urdf_validation import (
+    URDFValidationError,
+    physical_issues,
+    topology_issues,
+)
 
 
 class MujocoConversionManager:
@@ -259,6 +265,7 @@ class MujocoConversionManager:
             },
         )
         try:
+            self._validate_input()
             with tempfile.TemporaryDirectory(
                 prefix="urdf2mjcf-work-",
                 dir=self.output_dir,
@@ -301,6 +308,32 @@ class MujocoConversionManager:
     def _set_stage(self, stage: str) -> None:
         if self.last_report is not None:
             self.last_report["stage"] = stage
+
+    def _validate_input(self) -> None:
+        """Reject unrepairable declarations before copying or converting assets."""
+        self._set_stage("input_validation")
+        try:
+            robot = ET.parse(self.urdf_path).getroot()
+        except (OSError, ET.ParseError) as exc:
+            raise RuntimeError(f"Cannot parse URDF input: {exc}") from exc
+        if robot.tag != "robot":
+            raise RuntimeError("URDF root element must be <robot>")
+        issues, _ = topology_issues(robot)
+        issues.extend(physical_issues(robot))
+        errors = [
+            issue
+            for issue in issues
+            if issue["severity"] == "error"
+            and (
+                issue["code"] != "invalid_inertia" or not self.auto_recalculate_inertia
+            )
+        ]
+        if errors:
+            if self.last_report is not None:
+                self.last_report["issues"] = errors
+            raise RuntimeError(
+                f"URDF input validation failed: {URDFValidationError(errors)}"
+            )
 
     def _publish(self, pending_xml: Path, final_xml: Path) -> None:
         """Publish validated assets and XML together, rolling back on I/O errors."""
