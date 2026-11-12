@@ -300,6 +300,8 @@ output_dir/
 
 CI 覆盖 Python 3.11、3.12 和 3.13，并检查整个项目的格式与静态分析。测试包括实际调用转换器及 MuJoCo 加载校验。
 
+Python 3.12 的 CI 还会在全新环境安装 wheel，在源码目录外验证两个命令行后端。`python kit/benchmark_inertia_cache.py` 使用 24 个实例共用一个 5,120 面网格的固定案例，交替运行三轮，要求输出字节一致并报告耗时及加载次数；耗时不作为 CI 通过门槛。可加 `--output result.json` 保存测量结果。
+
 推荐的本地检查：
 
 ```bash

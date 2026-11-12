@@ -309,6 +309,8 @@ The repository includes lightweight formatting and lint configuration in `pyproj
 
 CI covers Python 3.11, 3.12, and 3.13 and checks formatting and lint across the project. Tests include actual external conversions and MuJoCo model loading.
 
+Python 3.12 CI also installs the wheel in a fresh environment and runs both CLI backends outside the checkout. `python kit/benchmark_inertia_cache.py` measures a bounded case of 24 instances sharing one 5,120-face mesh, with three alternating samples. It compares byte-identical outputs and reports timings and load counts; timing does not gate CI. Use `--output result.json` to save a measurement.
+
 Recommended local checks:
 
 ```bash

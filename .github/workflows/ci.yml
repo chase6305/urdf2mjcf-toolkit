@@ -46,6 +46,10 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
+      - name: Verify the bounded inertia cache benchmark
+        if: matrix.python-version == '3.12'
+        run: python kit/benchmark_inertia_cache.py --output "$RUNNER_TEMP/inertia-cache-benchmark.json"
+
       - name: Check Python sources
         run: python -m compileall -q urdf2mjcf kit tests
 
