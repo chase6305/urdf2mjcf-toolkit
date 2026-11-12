@@ -14,6 +14,43 @@ import trimesh
 from urdf2mjcf.urdf_to_mujoco_converter import MujocoConversionManager
 
 
+def test_old_xml_cannot_replace_fresh_glb_geometry(tmp_path):
+    visual = tmp_path / "meshes/visual"
+    stale = visual / "paint"
+    stale.mkdir(parents=True)
+    trimesh.creation.box(extents=[0.1, 0.2, 0.3]).export(visual / "paint.glb")
+    trimesh.creation.box(extents=[4, 5, 6]).export(stale / "old.obj")
+    old_xml = stale / "paint.xml"
+    old_xml.write_text(
+        '<mujoco><asset><mesh name="old" file="old.obj"/></asset>'
+        '<worldbody><body><geom mesh="old"/></body></worldbody></mujoco>'
+    )
+    previous = old_xml.read_bytes()
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        '<robot name="fresh_geometry"><link name="arm"><inertial><mass value="2"/>'
+        '<inertia ixx="2" iyy="3" izz="4"/></inertial><visual><geometry>'
+        '<mesh filename="meshes/visual/paint.glb"/></geometry></visual></link></robot>'
+    )
+    manager = MujocoConversionManager(source, tmp_path / "output", backend="urdf2mjcf")
+    model = mujoco.MjModel.from_xml_path(str(manager.run()))
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    gid = next(
+        gid
+        for gid in range(model.ngeom)
+        if model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_MESH
+    )
+    mesh_id = model.geom_dataid[gid]
+    start = model.mesh_vertadr[mesh_id]
+    vertices = model.mesh_vert[start : start + model.mesh_vertnum[mesh_id]]
+    world = vertices @ data.geom_xmat[gid].reshape(3, 3).T + data.geom_xpos[gid]
+    body = data.body("arm")
+    local = (world - body.xpos) @ body.xmat.reshape(3, 3)
+    np.testing.assert_allclose(np.ptp(local, axis=0), [0.1, 0.2, 0.3], atol=2e-6)
+    assert old_xml.read_bytes() == previous
+
+
 def _scene_colors(model):
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)

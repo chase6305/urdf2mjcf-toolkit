@@ -86,6 +86,68 @@ def test_numeric_suffixes_are_independent_input_meshes(tmp_path):
     }
 
 
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_successful_process_without_fresh_models_is_rejected(
+    tmp_path, monkeypatch, existing_output
+):
+    from types import SimpleNamespace
+
+    import urdf2mjcf.obj_to_mjcf_converter as obj_module
+
+    (tmp_path / "arm.obj").touch()
+    if existing_output:
+        _generated_model(tmp_path / "arm", ["arm.obj"])
+    monkeypatch.setattr(
+        obj_module.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(stdout="", returncode=0),
+    )
+    assert not OBJ2MJCFImporter(tmp_path).handle_dir(tmp_path)
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_success_requires_each_input_to_produce_a_model(
+    tmp_path, monkeypatch, complete
+):
+    from types import SimpleNamespace
+
+    import urdf2mjcf.obj_to_mjcf_converter as obj_module
+
+    for name in ("arm", "leg"):
+        (tmp_path / f"{name}.obj").touch()
+
+    def run(*args, **kwargs):
+        for name in (("arm", "leg") if complete else ("arm",)):
+            _generated_model(tmp_path / name, [f"{name}.obj"])
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(obj_module.subprocess, "run", run)
+    assert OBJ2MJCFImporter(tmp_path).handle_dir(tmp_path) is complete
+
+
+def test_run_does_not_let_old_parent_xml_hide_current_outputs(tmp_path, monkeypatch):
+    parent = tmp_path / "paint"
+    _generated_model(parent, ["old.obj"])
+    (parent / "paint.obj").touch()
+    previous = (parent / "paint.xml").read_bytes()
+    (tmp_path / "root.obj").touch()
+    importer = OBJ2MJCFImporter(tmp_path)
+
+    def convert(directory, command):
+        if directory == tmp_path:
+            _generated_model(tmp_path / "root", ["root.obj"])
+            return True
+        assert directory == parent
+        _generated_model(parent / "paint", ["fresh.obj"])
+        _generated_model(parent / "old", ["old.obj"])
+        return True
+
+    monkeypatch.setattr(importer, "handle_dir", convert)
+    importer.run(recursive=True, strict=True)
+    assert importer.get_obj_variant_map()["paint"] == ["paint/paint/fresh.obj"]
+    assert (parent / "paint.xml").read_bytes() == previous
+
+
 def test_unrelated_duplicate_basenames_are_rejected(tmp_path):
     for side in ("left", "right"):
         _generated_model(tmp_path / side / "arm", ["arm.obj"])

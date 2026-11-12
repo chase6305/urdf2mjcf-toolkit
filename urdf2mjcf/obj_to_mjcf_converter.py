@@ -1,9 +1,29 @@
 import os
+import stat
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+
+
+def _output_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _expected_models(directory: Path) -> set[Path]:
+    parent = directory.resolve()
+    return {
+        parent / path.stem / f"{path.stem}.xml"
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".obj"
+    }
 
 
 class OBJ2MJCFImporter:
@@ -18,6 +38,7 @@ class OBJ2MJCFImporter:
         self.root_dir = Path(root_dir)
         self.logger = URDF2MJCFLogger.get_logger("OBJ2MJCFImporter")
         self.failed_directories: list[Path] = []
+        self._current_models: set[Path] | None = None
         if not self.root_dir.is_dir():
             raise FileNotFoundError(f"Root directory does not exist: {root_dir}")
 
@@ -47,7 +68,10 @@ class OBJ2MJCFImporter:
             children.sort()
             directory = Path(current)
             subxml = directory / f"{directory.name}.xml"
-            if subxml.is_file():
+            current_output = (
+                self._current_models is None or subxml in self._current_models
+            )
+            if current_output and subxml.is_file():
                 children.clear()
                 try:
                     model = ET.parse(subxml).getroot()
@@ -115,6 +139,8 @@ class OBJ2MJCFImporter:
         if d.is_dir() and self._has_obj_files(d):
             self.logger.info(f"Processing obj2mjcf: {d}")
             try:
+                expected = _expected_models(d)
+                previous = {path: _output_signature(path) for path in expected}
                 result = subprocess.run(
                     [obj2mjcf_path, "--obj-dir", ".", "--overwrite", "--save-mjcf"],
                     cwd=str(d),
@@ -124,6 +150,18 @@ class OBJ2MJCFImporter:
                     text=True,
                 )
                 self.logger.debug(result.stdout)
+                stale = [
+                    path
+                    for path in sorted(expected)
+                    if (current := _output_signature(path)) is None
+                    or current == previous[path]
+                ]
+                if stale:
+                    self.logger.error(
+                        "OBJ conversion did not update expected models: %s",
+                        ", ".join(map(str, stale)),
+                    )
+                    return False
                 return True
             except FileNotFoundError:
                 self.logger.error(
@@ -153,6 +191,7 @@ class OBJ2MJCFImporter:
         """
         processed: list[Path] = []
         self.failed_directories = []
+        self._current_models = set()
         scan_root = self.root_dir
         if only_subdir:
             candidate = self.root_dir / only_subdir
@@ -169,8 +208,10 @@ class OBJ2MJCFImporter:
         def process_dir(directory: Path) -> None:
             if not self._has_obj_files(directory):
                 return
+            expected = _expected_models(directory)
             if self.handle_dir(directory, obj2mjcf_path):
                 processed.append(directory)
+                self._current_models.update(expected)
             else:
                 self.failed_directories.append(directory)
 
