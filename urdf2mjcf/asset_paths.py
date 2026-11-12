@@ -14,6 +14,20 @@ def _is_file(path: Path) -> bool:
         return False
 
 
+def find_asset_directory(urdf_path: Path, name: str) -> Path:
+    """Find a conventional asset tree without creating conversion directories."""
+    parent = Path(urdf_path).parent
+    roots = [parent, parent / "meshes"]
+    if parent.name.lower() == "urdf":
+        roots.append(parent.parent / "meshes")
+    for root in roots:
+        for variant in (name, name.capitalize(), name.upper()):
+            candidate = root / variant
+            if candidate.is_dir():
+                return candidate
+    return parent / name
+
+
 class MeshPathResolver:
     """Resolve exact paths first; index staged assets once for basename fallbacks."""
 

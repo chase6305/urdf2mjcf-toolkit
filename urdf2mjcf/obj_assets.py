@@ -1,6 +1,8 @@
 """Protect OBJ source dependencies and preserve outputs while converting."""
 
+import errno
 import json
+import os
 import shlex
 import shutil
 import stat
@@ -27,43 +29,58 @@ def _reference_paths(base: Path, text: str) -> set[Path]:
             regular = stat.S_ISREG(path.stat().st_mode)
         except (FileNotFoundError, NotADirectoryError):
             continue
+        except ValueError:
+            continue  # A malformed alternative cannot name an existing file.
+        except OSError as exc:
+            if exc.errno == errno.ENAMETOOLONG:
+                continue
+            raise
         if regular:
+            paths.add(Path(os.path.abspath(path)))
             paths.add(path.resolve())
     return paths
 
 
-def protect_obj_inputs(sources: list[Path], outputs: list[Path]) -> None:
-    """Reject OBJ/MTL/diffuse-texture inputs inside any replaced output tree."""
-    roots = {output.resolve() for output in outputs}
+def iter_obj_dependencies(sources: list[Path]):
+    """Yield OBJ files, MTL libraries and diffuse textures before publication.
 
-    def protect(path: Path):
-        if path in roots or any(parent in roots for parent in path.parents):
-            raise ValueError(f"OBJ output would replace an input asset: {path}")
-
+    Keep lexical paths and resolved file targets: replacing an input alias also
+    invalidates the source reference, even when its target lives elsewhere.
+    """
     inspected = set()
     for source in sources:
-        protect(source.resolve())
-        with source.open(encoding="utf-8") as stream:
+        yield Path(os.path.abspath(source))
+        yield source.resolve()
+        with source.open(encoding="utf-8", errors="surrogateescape") as stream:
             for line in stream:
                 words = line.split(maxsplit=1)
                 if len(words) != 2 or words[0] != "mtllib":
                     continue
-                for material in _reference_paths(source.parent, words[1]):
-                    protect(material)
+                for material in sorted(_reference_paths(source.parent, words[1])):
+                    yield material
                     key = (material, source.parent)
                     if key in inspected:
                         continue
                     inspected.add(key)
-                    with material.open(encoding="utf-8") as material_stream:
+                    with material.open(
+                        encoding="utf-8", errors="surrogateescape"
+                    ) as material_stream:
                         for definition in material_stream:
                             fields = definition.split(maxsplit=1)
                             if len(fields) != 2 or fields[0] != "map_Kd":
                                 continue
                             # Protect both standard MTL-relative paths and the
                             # OBJ-relative interpretation used by obj2mjcf.
-                            for base in {material.parent, source.parent}:
-                                for texture in _reference_paths(base, fields[1]):
-                                    protect(texture)
+                            for base in sorted({material.parent, source.parent}):
+                                yield from sorted(_reference_paths(base, fields[1]))
+
+
+def protect_obj_inputs(sources: list[Path], outputs: list[Path]) -> None:
+    """Reject OBJ/MTL/diffuse-texture inputs inside any replaced output tree."""
+    roots = {output.resolve() for output in outputs}
+    for path in iter_obj_dependencies(sources):
+        if path in roots or any(parent in roots for parent in path.parents):
+            raise ValueError(f"OBJ output would replace an input asset: {path}")
 
 
 def generated_obj_paths(subxml: Path, directory: Path) -> list[Path]:

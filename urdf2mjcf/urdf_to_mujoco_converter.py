@@ -13,6 +13,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from urdf2mjcf.asset_bundle import bundle_mjcf_assets, resolve_mjcf_asset_paths
+from urdf2mjcf.asset_paths import MeshPathResolver, find_asset_directory
 from urdf2mjcf.dae_to_obj_converter import DAE2OBJConverter
 from urdf2mjcf.glb_to_obj_converter import GLB2OBJConverter
 from urdf2mjcf.inspection import inspect_urdf
@@ -20,6 +21,7 @@ from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
 from urdf2mjcf.mjcf_editor import MJCFEditor
 from urdf2mjcf.native_mujoco_converter import NativeMujocoConverter
+from urdf2mjcf.obj_assets import iter_obj_dependencies
 from urdf2mjcf.obj_to_mjcf_converter import OBJ2MJCFImporter
 from urdf2mjcf.physics import validate_compiled_physics
 from urdf2mjcf.referenced_meshes import preprocess_referenced_meshes
@@ -95,19 +97,50 @@ class MujocoConversionManager:
 
     def _resolve_asset_dir(self, name: str) -> Path:
         """Resolve an asset directory path while tolerating common capitalization variants."""
-        roots = [self.urdf_path.parent, self.urdf_path.parent / "meshes"]
-        if self.urdf_path.parent.name.lower() == "urdf":
-            roots.append(self.urdf_path.parent.parent / "meshes")
-        candidates = [
-            root / variant
-            for root in roots
-            for variant in (name, name.capitalize(), name.upper())
-        ]
-        for candidate in candidates:
-            if candidate.exists() and candidate.is_dir():
-                self.logger.debug(f"Found asset directory: '{candidate}'")
-                return candidate
-        return self.urdf_path.parent / name
+        path = find_asset_directory(self.urdf_path, name)
+        if path.is_dir():
+            self.logger.debug("Found asset directory: '%s'", path)
+        return path
+
+    def _protect_source_asset(self, source: Path) -> None:
+        """Publication must not remove an input mesh, material, texture or alias."""
+        meshes = self.output_dir / "meshes"
+        if source.is_relative_to(meshes) or source.is_relative_to(meshes.resolve()):
+            raise ValueError(
+                f"Output asset directory contains a referenced source asset: {source}"
+            )
+        if source == self.output_dir / f"{self.urdf_path.stem}.xml":
+            raise ValueError(
+                f"Output XML would replace a referenced source asset: {source}"
+            )
+
+    def _validate_source_assets(self) -> None:
+        """Protect external OBJ side files as well as the copied asset trees."""
+        resolver = MeshPathResolver(
+            self.urdf_path.parent,
+            self.meshes_dir,
+            prefer_converted=False,
+            source_map=self._staged_asset_paths,
+        )
+        originals = {
+            staged.resolve(): source
+            for source, staged in self._staged_asset_paths.items()
+        }
+        meshes = set()
+        for mesh in ET.parse(self.urdf_path).getroot().findall("link/*/geometry/mesh"):
+            try:
+                resolved = resolver.resolve(mesh.get("filename", mesh.get("file", "")))
+            except (OSError, ValueError):
+                continue  # Conversion reports unresolved inputs in its normal stage.
+            source = originals.get(resolved, resolved)
+            self._protect_source_asset(source)
+            if (
+                source.suffix.lower() == ".obj"
+                and source not in self._staged_asset_paths
+            ):
+                meshes.add(source)
+        for dependency in iter_obj_dependencies(sorted(meshes)):
+            self._protect_source_asset(dependency)
 
     def _copy_tree(self, src: Path, dst: Path) -> None:
         """Recursively copy a directory while preserving relative layout."""
@@ -124,10 +157,16 @@ class MujocoConversionManager:
             disable=not sys.stderr.isatty(),
         ) as progress:
             for src_path in file_list:
+                source = src_path.resolve()
+                self._protect_source_asset(src_path.absolute())
+                self._protect_source_asset(source)
+                if src_path.suffix.lower() == ".obj":
+                    for dependency in iter_obj_dependencies([src_path]):
+                        self._protect_source_asset(dependency)
                 dst_path = dst / src_path.relative_to(src)
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dst_path)
-                self._staged_asset_paths[src_path.resolve()] = dst_path.resolve()
+                self._staged_asset_paths[source] = dst_path.resolve()
                 progress.update(1)
 
     def _convert_urdf_with_recovery(self, urdf_converter: URDFConverterBase) -> bool:
@@ -363,6 +402,7 @@ class MujocoConversionManager:
         self._copy_tree(self.visual_dir, self.visual_output_dir)
         if self.export_collision:
             self._copy_tree(self.collision_dir, self.collision_output_dir)
+        self._validate_source_assets()
 
         self._set_stage("mesh_conversion")
         self.logger.info("Converting DAE/GLB meshes to OBJ format...")
