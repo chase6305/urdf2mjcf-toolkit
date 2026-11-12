@@ -269,6 +269,8 @@ DAE conversion falls back to trimesh/pycollada when Blender is unavailable or it
 
 GLB conversion merges compatible material instances and retains distinct material groups in the same OBJ. `--no-merge` preserves every geometry group. Named materials, solid diffuse colors, and each material's base-color texture keep separate bindings; extracted image names are generated locally rather than used as paths. Explicit MJCF colors and texture bindings take precedence over filename-based texture discovery. This does not reproduce the complete glTF PBR shading model.
 
+Named URDF color materials remain attached to each visual instance, including every part produced by mesh material splitting. A color material that shares a mesh material's generated name is renamed with all of its references. Visuals without an explicit URDF color continue to use converted mesh materials.
+
 Direct GLB texture extraction validates the version, file/chunk lengths, chunk order, and embedded image ranges before importing geometry. It reads each image range from disk instead of loading the complete binary buffer. Geometry loading still needs memory for the mesh itself.
 
 Missing absolute mesh paths, `file://` paths, and parent-directory references fail explicitly. Basename compatibility lookup remains available for ordinary relative references.

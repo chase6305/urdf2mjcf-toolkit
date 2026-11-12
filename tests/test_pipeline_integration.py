@@ -3,6 +3,7 @@
 import os
 import shutil
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import mujoco
@@ -11,6 +12,134 @@ import pytest
 import trimesh
 
 from urdf2mjcf.urdf_to_mujoco_converter import MujocoConversionManager
+
+
+def _scene_colors(model):
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    scene = mujoco.MjvScene(model, maxgeom=100)
+    mujoco.mjv_updateScene(
+        model,
+        data,
+        mujoco.MjvOption(),
+        None,
+        mujoco.MjvCamera(),
+        mujoco.mjtCatBit.mjCAT_ALL,
+        scene,
+    )
+    return {
+        geom.objid: geom.rgba.copy()
+        for geom in scene.geoms[: scene.ngeom]
+        if geom.objtype == mujoco.mjtObj.mjOBJ_GEOM
+    }
+
+
+@pytest.mark.parametrize("backend", ["mujoco", "urdf2mjcf"])
+@pytest.mark.parametrize("mesh_format", ["obj", "stl"])
+def test_shared_mesh_instances_keep_explicit_global_and_inline_urdf_colors(
+    tmp_path, backend, mesh_format
+):
+    visual = tmp_path / "meshes/visual"
+    visual.mkdir(parents=True)
+    trimesh.creation.box(extents=[0.1, 0.2, 0.3]).export(visual / f"arm.{mesh_format}")
+    source = tmp_path / "robot.urdf"
+    robot = ET.Element("robot", name="instance_colors")
+    expected = ([1, 0, 0, 0.4], [0, 0, 1, 1], [0.5, 0.5, 0.5, 1])
+    for name, rgba in (("red", expected[0]), ("arm", expected[2])):
+        ET.SubElement(
+            ET.SubElement(robot, "material", name=name),
+            "color",
+            rgba=" ".join(map(str, rgba)),
+        )
+    link = ET.SubElement(robot, "link", name="arm")
+    inertial = ET.SubElement(link, "inertial")
+    ET.SubElement(inertial, "mass", value="2")
+    ET.SubElement(inertial, "inertia", ixx="2", iyy="3", izz="4")
+    for index, name in enumerate(("red", "blue", "arm")):
+        instance = ET.SubElement(link, "visual")
+        ET.SubElement(instance, "origin", xyz=f"{index} 0 0")
+        ET.SubElement(
+            ET.SubElement(instance, "geometry"),
+            "mesh",
+            filename=f"meshes/visual/arm.{mesh_format}",
+        )
+        material = ET.SubElement(instance, "material", name=name)
+        if name == "blue":
+            ET.SubElement(material, "color", rgba="0 0 1 1")
+    ET.ElementTree(robot).write(source)
+    original = source.read_bytes()
+    manager = MujocoConversionManager(source, tmp_path / "output", backend=backend)
+    output = manager.run()
+    model = mujoco.MjModel.from_xml_path(str(output))
+    colors = _scene_colors(model)
+    visual_ids = sorted(
+        (
+            gid
+            for gid in range(model.ngeom)
+            if model.geom_bodyid[gid] == model.body("arm").id
+        ),
+        key=lambda gid: model.geom_pos[gid, 0],
+    )
+    assert len(visual_ids) == 3
+    for gid, rgba in zip(visual_ids, expected, strict=True):
+        np.testing.assert_allclose(colors[gid], rgba, atol=1e-7)
+    manager.run()
+    repeated = mujoco.MjModel.from_xml_path(str(output))
+    repeated_colors = _scene_colors(repeated)
+    for gid, rgba in zip(visual_ids, expected, strict=True):
+        np.testing.assert_allclose(repeated_colors[gid], rgba, atol=1e-7)
+    assert source.read_bytes() == original
+
+
+def _painted_obj(path):
+    lines = ["mtllib colors.mtl"]
+    vertex_offset = 1
+    for index, color in enumerate(("red", "green")):
+        mesh = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
+        mesh.apply_translation([index * 0.3, 0, 0])
+        lines.append(f"o part_{index}")
+        lines.extend("v " + " ".join(map(str, vertex)) for vertex in mesh.vertices)
+        lines.append(f"usemtl {color}")
+        lines.extend(
+            "f " + " ".join(str(int(value) + vertex_offset) for value in face)
+            for face in mesh.faces
+        )
+        vertex_offset += len(mesh.vertices)
+    path.write_text("\n".join(lines) + "\n")
+    path.with_name("colors.mtl").write_text(
+        "newmtl red\nKd 1 0 0\nnewmtl green\nKd 0 1 0\n"
+    )
+
+
+def test_explicit_urdf_color_covers_all_parts_without_recoloring_other_instances(
+    tmp_path,
+):
+    visual = tmp_path / "meshes/visual"
+    visual.mkdir(parents=True)
+    _painted_obj(visual / "arm.obj")
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        '<robot name="part_colors"><material name="arm"><color rgba="0 0 1 0.6"/></material>'
+        '<link name="arm"><inertial><mass value="2"/><inertia ixx="2" iyy="3" izz="4"/></inertial>'
+        '<visual><geometry><mesh filename="meshes/visual/arm.obj"/></geometry><material name="arm"/></visual>'
+        '<visual><origin xyz="2 0 0"/><geometry><mesh filename="meshes/visual/arm.obj"/></geometry></visual>'
+        "</link></robot>"
+    )
+    manager = MujocoConversionManager(source, tmp_path / "output", backend="urdf2mjcf")
+    model = mujoco.MjModel.from_xml_path(str(manager.run()))
+    colors = _scene_colors(model)
+    visual_ids = sorted(
+        (
+            gid
+            for gid in range(model.ngeom)
+            if model.geom_bodyid[gid] == model.body("arm").id
+        ),
+        key=lambda gid: model.geom_pos[gid, 0],
+    )
+    assert len(visual_ids) == 4
+    expected = ([0, 0, 1, 0.6], [0, 0, 1, 0.6], [1, 0, 0, 1], [0, 1, 0, 1])
+    for gid, rgba in zip(visual_ids, expected, strict=True):
+        np.testing.assert_allclose(colors[gid], rgba, atol=1e-7)
 
 
 def test_native_visual_named_floor_keeps_its_geometry_and_a_distinct_ground(tmp_path):
@@ -105,29 +234,12 @@ def test_pipeline_produces_loadable_model(
 def test_numbered_meshes_and_multiple_materials_are_preserved(
     tmp_path, monkeypatch, shared_collision_mesh
 ):
-    import xml.etree.ElementTree as ET
-
     monkeypatch.setenv(
         "PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
     )
     visual = tmp_path / "meshes/visual"
     visual.mkdir(parents=True)
-    # Two closed meshes in one OBJ, with distinct materials and positions.
-    lines = ["mtllib colors.mtl"]
-    vertex_offset = 1
-    for index, color in enumerate(("red", "green")):
-        mesh = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
-        mesh.apply_translation([index * 0.3, 0, 0])
-        lines.append(f"o part_{index}")
-        lines.extend("v " + " ".join(map(str, vertex)) for vertex in mesh.vertices)
-        lines.append(f"usemtl {color}")
-        lines.extend(
-            "f " + " ".join(str(int(value) + vertex_offset) for value in face)
-            for face in mesh.faces
-        )
-        vertex_offset += len(mesh.vertices)
-    (visual / "link_1.obj").write_text("\n".join(lines) + "\n")
-    (visual / "colors.mtl").write_text("newmtl red\nKd 1 0 0\nnewmtl green\nKd 0 1 0\n")
+    _painted_obj(visual / "link_1.obj")
     trimesh.creation.box(extents=[0.2, 0.1, 0.1]).export(visual / "link_2.obj")
     source = tmp_path / "robot.urdf"
     collision = (

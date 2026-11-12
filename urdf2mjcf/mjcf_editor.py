@@ -1385,7 +1385,41 @@ class MJCFEditor:
             if not found:
                 self.logger.warning(f"Texture file not found: {tex_file}")
 
-    def add_variant_geoms_and_materials(self, variant_map):
+    def preserve_material_bindings(self, material_names, variant_map) -> set[str]:
+        """Reserve explicit materials before generating same-name mesh materials.
+
+        Keep existing names when possible. If a material shares a planned mesh
+        material name, rename that material and every reference together.
+        """
+        asset = self.root.find("asset")
+        if asset is None:
+            return set()
+        materials = {
+            material.get("name"): material for material in asset.findall("material")
+        }
+        protected = set(material_names) & materials.keys()
+        variants = {
+            name if index == 0 else f"{name}_{index}"
+            for name, paths in variant_map.items()
+            for index in range(len(paths))
+        }
+        occupied = materials.keys() | variants
+        renamed = {}
+        for name in sorted(protected & variants):
+            base = f"{name}_urdf"
+            candidate, index = base, 0
+            while candidate in occupied:
+                index += 1
+                candidate = f"{base}_{index}"
+            materials[name].set("name", candidate)
+            occupied.add(candidate)
+            renamed[name] = candidate
+        for element in self.root.iter():
+            if element.get("material") in renamed:
+                element.set("material", renamed[element.get("material")])
+        return (protected - renamed.keys()) | set(renamed.values())
+
+    def add_variant_geoms_and_materials(self, variant_map, *, protected_materials=None):
         """Expand material parts for every visual instance, preserving its transform.
 
         Stable, unique geom names make expansion idempotent across save/reload.
@@ -1396,6 +1430,7 @@ class MJCFEditor:
         if asset is None or worldbody is None:
             return
         materials = {node.get("name") for node in asset.findall("material")}
+        protected_materials = set(protected_materials or ())
         meshes = {node.get("name") for node in asset.findall("mesh")}
         named_geoms = {
             geom.get("name"): geom
@@ -1418,7 +1453,8 @@ class MJCFEditor:
                     raise ValueError(f"Missing variant mesh assets: {sorted(missing)}")
                 if source.get("class") not in {"visual", "visualgeom"}:
                     source.set("class", "visualgeom")
-                if mesh_name in materials:
+                keep_material = source.get("material") in protected_materials
+                if mesh_name in materials and not keep_material:
                     source.set("material", mesh_name)
                 if len(variants) == 1:
                     continue
@@ -1432,7 +1468,7 @@ class MJCFEditor:
                 for index, variant_name in enumerate(variant_names[1:], start=1):
                     attributes = source.attrib.copy()
                     attributes.update(type="mesh", mesh=variant_name)
-                    if variant_name in materials:
+                    if variant_name in materials and not keep_material:
                         attributes["material"] = variant_name
                     base_name = f"{source.get('name')}__variant_{index}"
                     name = base_name

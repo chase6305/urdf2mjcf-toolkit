@@ -200,6 +200,28 @@ def test_material_helpers_import_self_closing_material_elements(tmp_path):
     assert material.get("specular") == expected["specular"]
 
 
+def test_explicit_material_renaming_preserves_every_reference_and_avoids_variants(
+    tmp_path,
+):
+    editor = MJCFEditor(
+        _write_model(
+            tmp_path, '<body><geom material="arm"/><site material="arm"/></body>'
+        )
+    )
+    asset = editor.root.find("asset")
+    original = ET.SubElement(asset, "material", name="arm", rgba="0.5 0.5 0.5 1")
+    other = ET.SubElement(asset, "material", name="arm_urdf", rgba="1 0 0 1")
+    variant_map = {"arm": ["one.obj", "two.obj"], "arm_urdf_1": ["three.obj"]}
+    protected = editor.preserve_material_bindings({"arm"}, variant_map)
+    assert len(protected) == 1
+    renamed = next(iter(protected))
+    assert renamed not in {"arm", "arm_1", "arm_urdf", "arm_urdf_1"}
+    assert original.get("rgba") == "0.5 0.5 0.5 1"
+    assert other.get("name") == "arm_urdf"
+    assert editor.root.find("worldbody/body/geom").get("material") == renamed
+    assert editor.root.find("worldbody/body/site").get("material") == renamed
+
+
 def test_floating_base_rejects_existing_hinge(tmp_path):
     import pytest
 

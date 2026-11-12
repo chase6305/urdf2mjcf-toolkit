@@ -461,6 +461,20 @@ class MujocoConversionManager:
                 self.visual_output_dir, variant_map=obj_variant_map
             )
             editor.auto_add_mesh_variants(obj_variant_map, prefix="visual/")
+            explicit_materials = set()
+            prepared_tree = getattr(urdf_converter, "prepared_tree", None)
+            if prepared_tree is not None:
+                robot = prepared_tree.getroot()
+                visual_materials = robot.findall("link/visual/material")
+                defined = {
+                    material.get("name")
+                    for material in [*robot.findall("material"), *visual_materials]
+                    if material.get("name") and material.find("color") is not None
+                }
+                referenced = {material.get("name") for material in visual_materials}
+                explicit_materials = editor.preserve_material_bindings(
+                    defined & referenced, obj_variant_map
+                )
             editor.remove_meshes_prefix()
             editor.remap_materials_and_textures_for_mesh_variants_with_xml(
                 obj_variant_map, self.visual_output_dir
@@ -486,7 +500,9 @@ class MujocoConversionManager:
             editor.remove_missing_textures(search_dirs=[self.meshes_dir])
             editor.remove_invalid_material_textures()
             editor.remove_invalid_mesh_geoms()
-            editor.add_variant_geoms_and_materials(obj_variant_map)
+            editor.add_variant_geoms_and_materials(
+                obj_variant_map, protected_materials=explicit_materials
+            )
             editor.remove_invalid_mesh_geoms()
 
             if self.export_collision:
