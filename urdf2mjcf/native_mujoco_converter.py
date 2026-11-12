@@ -4,6 +4,10 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from urdf2mjcf.mesh_identity import (
+    remove_unused_mesh_assets,
+    restore_native_mesh_references,
+)
 from urdf2mjcf.physics import restore_urdf_physics
 from urdf2mjcf.urdf_to_mjcf_converter import URDFConverterBase
 
@@ -40,7 +44,9 @@ class NativeMujocoConverter(URDFConverterBase):
                 source = Path(staging) / self.urdf_path.name
                 tree.write(source, encoding="utf-8", xml_declaration=True)
                 spec = mujoco.MjSpec.from_file(str(source))
+                restore_native_mesh_references(spec, tree.getroot(), self.assets_dir)
                 result = ET.fromstring(spec.to_xml())
+                remove_unused_mesh_assets(result)
                 restore_urdf_physics(result, tree.getroot())
                 pending = Path(staging) / f"{self.urdf_path.stem}.xml"
                 ET.ElementTree(result).write(

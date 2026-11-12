@@ -12,6 +12,7 @@ from pathlib import Path
 
 from urdf2mjcf.asset_paths import MeshPathResolver
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.mesh_identity import restore_external_mesh_references
 from urdf2mjcf.physics import normalize_urdf_physics, restore_urdf_physics
 from urdf2mjcf.urdf_validation import validate_urdf_physics, validate_urdf_structure
 
@@ -42,12 +43,12 @@ class URDFConverterBase(ABC):
         normalize_urdf_physics(tree.getroot())
         changed = 0
         for elem in tree.getroot().iter("mesh"):
-            for attr in ("filename", "file"):
-                if attr in elem.attrib:
-                    old = elem.attrib[attr]
-                    new = resolver.resolve(old).as_posix()
-                    elem.set(attr, new)
-                    changed += old != new
+            old = elem.get("filename", elem.get("file", ""))
+            new = resolver.resolve(old).as_posix()
+            # Both upstream importers require the canonical URDF attribute.
+            elem.set("filename", new)
+            elem.attrib.pop("file", None)
+            changed += old != new
         self.logger.debug("Resolved %s mesh references", changed)
         self.prepared_tree = tree
         return tree
@@ -172,6 +173,9 @@ class URDF2MJCFConverter(URDFConverterBase):
     def _restore_physics(self, source: ET.ElementTree) -> None:
         converted = ET.parse(self.output_xml)
         restore_urdf_physics(converted.getroot(), source.getroot())
+        restore_external_mesh_references(
+            converted.getroot(), source.getroot(), self.assets_dir
+        )
         converted.write(self.output_xml, encoding="utf-8", xml_declaration=True)
 
     def get_output_xml(self) -> Path | None:

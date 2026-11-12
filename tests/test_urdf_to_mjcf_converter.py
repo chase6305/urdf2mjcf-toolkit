@@ -59,7 +59,12 @@ def test_staged_urdf_prefers_converted_obj(tmp_path, monkeypatch):
         staged_urdf = Path(command[1])
         mesh = ET.parse(staged_urdf).getroot().find(".//mesh")
         assert mesh.get("filename").endswith("/visual/arm.obj")
-        converter.output_xml.write_text('<mujoco model="fresh" />', encoding="utf-8")
+        converter.output_xml.write_text(
+            '<mujoco model="fresh"><worldbody><body name="arm">'
+            '<geom type="mesh" mesh="arm.obj" class="visual"/>'
+            "</body></worldbody></mujoco>",
+            encoding="utf-8",
+        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(converter_module.subprocess, "run", fake_run)

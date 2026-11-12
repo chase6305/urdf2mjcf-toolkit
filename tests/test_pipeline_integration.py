@@ -84,7 +84,10 @@ def test_pipeline_produces_loadable_model(
     assert source.read_bytes() == original
 
 
-def test_numbered_meshes_and_multiple_materials_are_preserved(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shared_collision_mesh", [False, True])
+def test_numbered_meshes_and_multiple_materials_are_preserved(
+    tmp_path, monkeypatch, shared_collision_mesh
+):
     import xml.etree.ElementTree as ET
 
     monkeypatch.setenv(
@@ -110,12 +113,17 @@ def test_numbered_meshes_and_multiple_materials_are_preserved(tmp_path, monkeypa
     (visual / "colors.mtl").write_text("newmtl red\nKd 1 0 0\nnewmtl green\nKd 0 1 0\n")
     trimesh.creation.box(extents=[0.2, 0.1, 0.1]).export(visual / "link_2.obj")
     source = tmp_path / "robot.urdf"
-    source.write_text("""<robot name="parts"><link name="arm">
+    collision = (
+        '<mesh filename="meshes/visual/link_1.obj" scale="0.5 2 1"/>'
+        if shared_collision_mesh
+        else '<box size="0.1 0.1 0.1"/>'
+    )
+    source.write_text(f"""<robot name="parts"><link name="arm">
       <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
       <visual><geometry><mesh filename="meshes/visual/link_1.obj"/></geometry></visual>
       <visual><origin xyz="1 0 0"/><geometry><mesh filename="meshes/visual/link_1.obj" scale="2 1 1"/></geometry></visual>
       <visual><origin xyz="2 0 0"/><geometry><mesh filename="meshes/visual/link_2.obj"/></geometry></visual>
-      <collision><geometry><box size="0.1 0.1 0.1"/></geometry></collision>
+      <collision><geometry>{collision}</geometry></collision>
     </link></robot>""")
     manager = MujocoConversionManager(source, tmp_path / "output", backend="urdf2mjcf")
     output = manager.run()
@@ -131,6 +139,26 @@ def test_numbered_meshes_and_multiple_materials_are_preserved(tmp_path, monkeypa
     }
     assert colors == {(1, 0, 0, 1), (0, 1, 0, 1)}
     assert root.find("asset/mesh[@name='link_2']") is not None
+    if shared_collision_mesh:
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        gid = next(
+            i
+            for i in range(model.ngeom)
+            if model.geom_bodyid[i] == model.body("arm").id
+            and model.geom_contype[i] != 0
+        )
+        mesh_id = model.geom_dataid[gid]
+        start = model.mesh_vertadr[mesh_id]
+        vertices = model.mesh_vert[start : start + model.mesh_vertnum[mesh_id]]
+        world = vertices @ data.geom_xmat[gid].reshape(3, 3).T + data.geom_xpos[gid]
+        body = data.body("arm")
+        local = (world - body.xpos) @ body.xmat.reshape(3, 3)
+        np.testing.assert_allclose(
+            [local.min(axis=0), local.max(axis=0)],
+            [[-0.025, -0.1, -0.05], [0.175, 0.1, 0.05]],
+            atol=2e-6,
+        )
     first_xml = output.read_bytes()
     manager.run()
     assert output.read_bytes() == first_xml
