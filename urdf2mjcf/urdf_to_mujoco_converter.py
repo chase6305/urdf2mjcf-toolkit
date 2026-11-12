@@ -134,7 +134,12 @@ class MujocoConversionManager:
                 return True
 
         detail = getattr(urdf_converter, "last_error", None)
-        if detail and not any(word in detail.lower() for word in ("inertia", "mass")):
+        codes = getattr(urdf_converter, "last_error_codes", ())
+        if (codes and set(codes) != {"invalid_inertia"}) or (
+            not codes
+            and detail
+            and not any(word in detail.lower() for word in ("inertia", "mass"))
+        ):
             self.logger.debug(
                 "Skipping inertia recovery for a non-inertia conversion error"
             )

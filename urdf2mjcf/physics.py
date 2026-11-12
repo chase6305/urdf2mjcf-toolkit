@@ -24,6 +24,10 @@ def numbers(values) -> str:
 def origin_transform(origin: ET.Element | None) -> np.ndarray:
     if origin is None:
         return np.eye(4)
+    if "quat_xyzw" in origin.attrib:
+        raise ValueError(
+            "Quaternion origins (quat_xyzw) are not supported; express the orientation using rpy"
+        )
     transform = euler_matrix(*vector(origin.get("rpy", "0 0 0")), axes="sxyz")
     transform[:3, 3] = vector(origin.get("xyz", "0 0 0"))
     return transform
@@ -101,7 +105,14 @@ def normalize_urdf_physics(robot: ET.Element) -> None:
             axis = joint.find("axis")
             if axis is None:
                 axis = ET.SubElement(joint, "axis")
-            axis.set("xyz", numbers(vector(axis.get("xyz", "1 0 0"))))
+            value = vector(axis.get("xyz", "1 0 0"))
+            if not np.any(value):
+                raise ValueError(f"Joint axis must be nonzero: {joint.get('name')}")
+            # Scaling first avoids overflow and underflow while normalizing
+            # finite, nonzero axes. Axis magnitude has no URDF physical meaning.
+            value /= np.max(np.abs(value))
+            value /= np.linalg.norm(value)
+            axis.set("xyz", numbers(value))
     for inertial in robot.findall("link/inertial"):
         mass = inertial.find("mass")
         if mass is not None:
@@ -211,12 +222,25 @@ def restore_urdf_physics(mjcf: ET.Element, urdf: ET.Element) -> None:
             if effort > 0:
                 joint.set("actuatorfrclimited", "true")
                 joint.set("actuatorfrcrange", numbers([-effort, effort]))
+            else:
+                # MuJoCo rejects a zero-width joint actuatorfrcrange. Clamp
+                # each generated actuator instead, retaining the passive DoF.
+                joint.set("actuatorfrclimited", "false")
+                joint.attrib.pop("actuatorfrcrange", None)
+                for actuator in mjcf.findall("actuator/*"):
+                    if source.get("name") in (
+                        actuator.get("joint"),
+                        actuator.get("jointinparent"),
+                    ):
+                        actuator.set("forcelimited", "true")
+                        actuator.set("forcerange", "0 0")
 
 
 def validate_compiled_physics(model) -> None:
     """Compilation alone permits infinity in some physical model arrays."""
     for name in (
         "body_mass",
+        "body_subtreemass",
         "body_inertia",
         "body_pos",
         "body_quat",
@@ -227,6 +251,9 @@ def validate_compiled_physics(model) -> None:
         "jnt_range",
         "dof_damping",
         "dof_frictionloss",
+        "dof_M0",
+        "dof_invweight0",
+        "body_invweight0",
         "geom_pos",
         "geom_quat",
         "geom_size",

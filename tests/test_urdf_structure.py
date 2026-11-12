@@ -78,7 +78,7 @@ def test_inspection_and_importers_reject_malformed_graphs(
 def test_invalid_topology_does_not_replace_previous_model(tmp_path, backend):
     source = tmp_path / "robot.urdf"
     source.write_text(
-        '<robot name="valid"><link name="base">'
+        '<robot name="valid"><link name="mass_mount">'
         '<visual><geometry><box size="1 1 1"/></geometry></visual>'
         "</link></robot>"
     )

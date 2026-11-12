@@ -8,6 +8,57 @@ import numpy as np
 from urdf2mjcf.physics import origin_transform, validate_inertial, vector
 
 
+class URDFValidationError(ValueError):
+    """Input diagnostics that retain their codes across converter boundaries."""
+
+    def __init__(self, issues: list[dict]):
+        self.issues = issues
+        super().__init__(
+            "; ".join(f"[{issue['code']}] {issue['message']}" for issue in issues)
+        )
+
+
+def declaration_issues(robot: ET.Element) -> list[dict]:
+    """Reject repeated singleton declarations instead of interpreting the first."""
+    issues = []
+
+    def unique(parent, tags, context):
+        for tag in tags:
+            if len(parent.findall(tag)) > 1:
+                location = ", ".join(
+                    f"{key}={value!r}" for key, value in context.items()
+                )
+                issues.append(
+                    {
+                        "severity": "error",
+                        "code": "ambiguous_definition",
+                        "message": f"{location}: Multiple <{tag}> elements in <{parent.tag}>",
+                        "element": tag,
+                        **context,
+                    }
+                )
+
+    for joint in robot.findall("joint"):
+        unique(
+            joint,
+            ("origin", "axis", "limit", "dynamics", "mimic"),
+            {"joint": joint.get("name")},
+        )
+    for link in robot.findall("link"):
+        context = {"link": link.get("name")}
+        unique(link, ("inertial",), context)
+        for inertial in link.findall("inertial"):
+            unique(inertial, ("origin", "mass", "inertia"), context)
+        for kind in ("visual", "collision"):
+            for index, instance in enumerate(link.findall(kind)):
+                unique(
+                    instance,
+                    ("origin", "geometry"),
+                    {**context, "kind": kind, "index": index},
+                )
+    return issues
+
+
 def topology_issues(robot: ET.Element) -> tuple[list[dict], list[str]]:
     """Return structural errors and sorted root names without recursive traversal.
 
@@ -86,9 +137,7 @@ def validate_urdf_structure(robot: ET.Element) -> None:
     """Reject malformed graphs consistently with read-only inspection."""
     issues, _ = topology_issues(robot)
     if issues:
-        raise ValueError(
-            "; ".join(f"[{issue['code']}] {issue['message']}" for issue in issues)
-        )
+        raise URDFValidationError(issues)
 
 
 def physical_issues(robot: ET.Element) -> list[dict]:
@@ -239,13 +288,11 @@ def physical_issues(robot: ET.Element) -> list[dict]:
             if key in issue
         )
         issue["message"] = f"{context}: {issue['message']}"
-    return issues
+    return declaration_issues(robot) + issues
 
 
 def validate_urdf_physics(robot: ET.Element) -> None:
     """Use the same input checks for conversion as for the inspection command."""
     errors = [issue for issue in physical_issues(robot) if issue["severity"] == "error"]
     if errors:
-        raise ValueError(
-            "; ".join(f"[{issue['code']}] {issue['message']}" for issue in errors)
-        )
+        raise URDFValidationError(errors)

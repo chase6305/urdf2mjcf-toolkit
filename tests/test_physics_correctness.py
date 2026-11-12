@@ -27,6 +27,84 @@ def _pose(xyz, rpy):
     return result
 
 
+@pytest.mark.parametrize("backend", ["mujoco", "urdf2mjcf"])
+@pytest.mark.parametrize("magnitude", [1e-300, 1e300])
+@pytest.mark.parametrize("kind", ["revolute", "prismatic"])
+def test_axis_direction_is_independent_of_finite_magnitude(
+    tmp_path, backend, magnitude, kind
+):
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        f"""<robot name="axis"><link name="base"/>
+    <link name="arm"><inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1"/></inertial>
+    <visual><geometry><box size="1 1 1"/></geometry></visual></link>
+    <joint name="joint" type="{kind}"><parent link="base"/><child link="arm"/>
+    <axis xyz="{magnitude} {2*magnitude} {-2*magnitude}"/><limit lower="-1" upper="1" effort="10"/></joint></robot>"""
+    )
+    original = source.read_bytes()
+    manager = MujocoConversionManager(source, tmp_path / "output", backend=backend)
+    model = mujoco.MjModel.from_xml_path(str(manager.run()))
+    expected = np.array([1, 2, -2]) / 3
+    np.testing.assert_allclose(model.joint("joint").axis, expected, atol=1e-12)
+    data = mujoco.MjData(model)
+    data.qpos[0] = 0.25
+    mujoco.mj_forward(model, data)
+    if kind == "prismatic":
+        base = data.body("base")
+        np.testing.assert_allclose(
+            data.body("arm").xpos - base.xpos,
+            base.xmat.reshape(3, 3) @ (0.25 * expected),
+            atol=1e-12,
+        )
+    else:
+        cross = np.array(
+            [
+                [0, -expected[2], expected[1]],
+                [expected[2], 0, -expected[0]],
+                [-expected[1], expected[0], 0],
+            ]
+        )
+        rotation = (
+            np.eye(3) + np.sin(0.25) * cross + (1 - np.cos(0.25)) * (cross @ cross)
+        )
+        np.testing.assert_allclose(
+            data.body("arm").xmat.reshape(3, 3),
+            data.body("base").xmat.reshape(3, 3) @ rotation,
+            atol=1e-12,
+        )
+    assert manager.last_report["inertia_recovery_attempts"] == 0
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("backend", ["mujoco", "urdf2mjcf"])
+def test_zero_effort_retains_passive_motion_and_disables_generated_actuation(
+    tmp_path, backend
+):
+    source = tmp_path / "robot.urdf"
+    source.write_text("""<robot name="passive"><link name="base"/>
+    <link name="arm"><inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1"/></inertial>
+    <visual><geometry><box size="1 1 1"/></geometry></visual></link>
+    <joint name="hinge" type="revolute"><parent link="base"/><child link="arm"/>
+    <limit lower="-1" upper="1" effort="0"/></joint></robot>""")
+    manager = MujocoConversionManager(source, tmp_path / "output", backend=backend)
+    model = mujoco.MjModel.from_xml_path(str(manager.run()))
+    assert model.nv == 1
+    assert model.nu == (1 if backend == "urdf2mjcf" else 0)
+    if model.nu:
+        assert bool(model.actuator_forcelimited[0])
+        np.testing.assert_array_equal(model.actuator_forcerange[0], [0, 0])
+    data = mujoco.MjData(model)
+    for command in (-1e6, 1e6):
+        data.ctrl[:] = command
+        mujoco.mj_forward(model, data)
+        np.testing.assert_array_equal(data.qfrc_actuator, [0])
+    data.qpos[0] = 0.3
+    mujoco.mj_forward(model, data)
+    np.testing.assert_allclose(
+        data.body("arm").xmat.reshape(3, 3), _rotation([0.3, 0, 0]), atol=1e-12
+    )
+
+
 @pytest.mark.parametrize("backend", ["urdf2mjcf", "mujoco"])
 @pytest.mark.parametrize("floating", [False, True])
 def test_joint_kinematics_and_full_inertia_match_analytic_values(

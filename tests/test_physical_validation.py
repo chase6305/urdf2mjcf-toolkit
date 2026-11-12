@@ -114,3 +114,63 @@ def test_massless_static_frame_and_nonunit_axis_are_valid_inputs(tmp_path):
     source = tmp_path / "robot.urdf"
     ET.ElementTree(root).write(source)
     assert inspect_urdf(source)["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    "parent_path, child_tag",
+    [
+        ("joint", "axis"),
+        ("joint", "origin"),
+        ("joint", "limit"),
+        ("joint", "dynamics"),
+        ("link[@name='arm']", "inertial"),
+        ("link/inertial", "mass"),
+        ("link/inertial", "inertia"),
+        ("link/inertial", "origin"),
+        ("link/visual", "geometry"),
+        ("link/visual", "origin"),
+    ],
+)
+def test_repeated_singleton_definitions_are_rejected(tmp_path, parent_path, child_tag):
+    import copy
+
+    from urdf2mjcf.urdf_inertia_calculator import URDFInertiaCalculator
+
+    root = ET.fromstring(ROBOT)
+    parent = root.find(parent_path)
+    child = parent.find(child_tag)
+    if child is None:
+        child = ET.SubElement(parent, child_tag)
+    parent.append(copy.deepcopy(child))
+    source = tmp_path / "robot.urdf"
+    ET.ElementTree(root).write(source)
+    original = source.read_bytes()
+    report = inspect_urdf(source)
+    assert report["status"] == "failed"
+    assert any(
+        issue["code"] == "ambiguous_definition" and issue["element"] == child_tag
+        for issue in report["issues"]
+    )
+    converter = NativeMujocoConverter(source, tmp_path / "output", tmp_path)
+    with pytest.raises(ValueError, match="ambiguous_definition"):
+        converter.prepare_urdf_tree()
+    calculator = URDFInertiaCalculator(source)
+    assert not calculator.update_inertia()
+    assert "ambiguous_definition" in calculator.last_error
+    assert source.read_bytes() == original
+    assert not source.with_suffix(".urdf.backup").exists()
+
+
+@pytest.mark.parametrize("origin_path", ["joint", "link/inertial", "link/visual"])
+def test_quaternion_origins_cannot_be_silently_ignored(tmp_path, origin_path):
+    root = ET.fromstring(ROBOT)
+    root.set("version", "1.1")
+    ET.SubElement(root.find(origin_path), "origin", quat_xyzw="0 0 1 0")
+    source = tmp_path / "robot.urdf"
+    ET.ElementTree(root).write(source)
+    report = inspect_urdf(source)
+    assert report["status"] == "failed"
+    assert any("quat_xyzw" in issue["message"] for issue in report["issues"])
+    converter = NativeMujocoConverter(source, tmp_path / "output", tmp_path)
+    with pytest.raises(ValueError, match="quat_xyzw"):
+        converter.prepare_urdf_tree()

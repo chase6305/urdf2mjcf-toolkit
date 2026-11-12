@@ -101,6 +101,8 @@ Both backends share mesh format conversion, base settings, ground setup, and fin
 
 Physical correctness checks and remaining limits are recorded in the [correctness audit](docs/correctness-audit.md). Conversion preserves explicit root/link inertias and joint dynamics; unsupported mimic, planar, and internal floating joints fail explicitly. Each run stages fresh assets and restores the previous XML and assets if conversion or publication fails. Output directories must be exclusive to one conversion task.
 
+Mesh instances retain their exact source file and scale even when OBJ/STL filenames match across directories or a filename resembles a generated scale suffix. Collision meshes retain their complete geometry when the same file is also used for a visual that is split by material. Native mesh aliases are temporary; the published output contains bundled runtime files.
+
 Inertia recalculation combines all geometries of the selected category, including mesh scales and frame rotations. It supports closed solid meshes and analytic box, sphere, and cylinder shapes, preserves existing mass, and assumes uniform density with additive component volumes. Any failed link aborts the source-file update.
 
 ## Checks and JSON Reports
@@ -114,6 +116,8 @@ urdf2mjcf-toolkit robot.urdf ./output --backend auto --report ./reports/conversi
 ```
 
 `--check` validates XML, link/joint names, root links, parent/child references, cycles, mesh paths, and mesh scales. It also checks finite origins, nonzero joint axes, ordered joint limits, nonnegative dynamics/effort/velocity parameters, primitive dimensions, mass, and the principal moments of explicit inertia tensors. Both visual and collision declarations are checked. Problems are collected with joint/link and geometry-instance context. Both conversion backends enforce the same topology and physical input checks: the input must form one connected tree with unique names and exactly one parent and child declaration per joint.
+
+Repeated singleton declarations such as two inertias, axes, limits, origins, or geometry elements fail with `ambiguous_definition`; the inertia calculator also refuses to rewrite such inputs. Origins must use `xyz`/`rpy`: `quat_xyzw` is currently rejected explicitly. Finite, nonzero joint axes are normalized before import regardless of magnitude. A positive effort limit clamps total joint actuator force; a zero effort limit keeps the passive degree of freedom and clamps every generated actuator's force to zero.
 
 Checks do not invoke converters or create the conversion output directory. Mesh contents, textures, inferred inertias, and compiled dynamics still require conversion and MuJoCo validation; a passing check does not guarantee a successful conversion. Velocity limits produce a `velocity_limit_unenforced` warning because they require controller enforcement. Warnings alone keep the check status `passed` and exit code `0`. Conversion-only options are ignored in check mode; the requested backend is recorded as context.
 

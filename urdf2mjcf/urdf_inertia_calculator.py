@@ -27,6 +27,7 @@ from urdf2mjcf.physics import (
     validate_inertial,
     vector,
 )
+from urdf2mjcf.urdf_validation import URDFValidationError, declaration_issues
 
 
 class URDFInertiaCalculator:
@@ -322,6 +323,9 @@ class URDFInertiaCalculator:
             root = tree.getroot()
             if root.tag != "robot":
                 raise ValueError("Expected a <robot> root element")
+            issues = declaration_issues(root)
+            if issues:
+                raise URDFValidationError(issues)
             resolver = MeshPathResolver(
                 self.urdf_dir, self.urdf_dir, prefer_converted=False
             )

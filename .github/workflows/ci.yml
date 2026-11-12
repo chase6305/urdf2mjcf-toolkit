@@ -2,14 +2,31 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  CTEST_PARALLEL_LEVEL: "1"
+  MAX_JOBS: "2"
+  RAYON_NUM_THREADS: "2"
+  BLACK_NUM_WORKERS: "2"
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

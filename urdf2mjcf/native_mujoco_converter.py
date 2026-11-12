@@ -22,6 +22,7 @@ class NativeMujocoConverter(URDFConverterBase):
     def convert(self) -> bool:
         self.output_xml = None
         self.last_error = None
+        self.last_error_codes = ()
         try:
             import mujoco
 

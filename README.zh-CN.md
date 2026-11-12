@@ -96,6 +96,8 @@ urdf2mjcf-toolkit robot.urdf ./output --backend auto --floating-base
 
 具体数值验证和适用边界见[正确性检查记录](docs/correctness-audit.md)。转换保留显式定义的根节点/各 link 惯量和关节动力学参数；不支持的 mimic、planar、内部 floating 关节会明确失败。每次运行使用全新暂存资源，转换或发布失败时保留旧 XML 和旧网格。一个输出目录应由一个转换任务独占。
 
+OBJ/STL 在不同目录中同名，或文件名与自动生成的缩放后缀相似时，各实例仍使用其确切源文件及缩放。碰撞几何与视觉共用源文件时，仍保留完整碰撞网格，视觉可按材质拆分。原生导入时使用的网格别名仅存在于临时目录，发布结果包含已收集的运行资源。
+
 惯量重算会汇总选定类别的全部几何体，处理网格缩放和坐标系旋转；支持封闭实体网格及长方体、球、圆柱的解析计算。它保留已有质量，假设均匀密度且各组件体积可相加；任何 link 计算失败都不会写入部分更新。
 
 ## 转换前检查与 JSON 报告
@@ -107,6 +109,8 @@ urdf2mjcf-toolkit robot.urdf ./output --backend auto --report ./reports/conversi
 ```
 
 `--check` 检查 XML、link/joint 名称、根节点、父子引用、关节环路、网格路径和缩放值，也检查有限的 origin、非零关节轴、有序限位、非负动力学/effort/velocity 参数、基本几何尺寸、质量及显式惯量张量的主惯量。视觉与碰撞定义均会检查；问题包含对应 joint、link 和几何实例的位置。两种转换后端使用相同的拓扑及物理参数检查：输入必须构成单棵连通树，名称唯一，且每个关节有且只有一个 parent 和 child 定义。
+
+重复的单一定义（如多个惯量、axis、limit、origin 或 geometry）会报告 `ambiguous_definition`；独立惯量重算工具也不会改写这种输入。origin 须使用 `xyz`/`rpy`，目前会明确拒绝 `quat_xyzw`。有限非零关节轴会在导入前归一化，不受原数值大小影响。正 effort 上限约束关节的合计执行器力；effort 为零时保留被动自由度，并将所有自动生成执行器的输出力限制为零。
 
 检查时不调用转换器，也不创建转换输出目录。网格内容、纹理、隐式推断的惯量和编译后的动力学仍需通过实际转换与 MuJoCo 校验；检查通过不代表转换一定成功。velocity 上限会产生 `velocity_limit_unenforced` 提示，说明速度约束需要控制器实现。只有 warning 时，检查状态仍为 `passed`，退出码为 `0`。检查模式忽略转换专用选项，仅将请求的后端记录为上下文。
 

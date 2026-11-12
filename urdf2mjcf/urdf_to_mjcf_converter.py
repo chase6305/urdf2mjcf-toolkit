@@ -14,7 +14,11 @@ from urdf2mjcf.asset_paths import MeshPathResolver
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.mesh_identity import restore_external_mesh_references
 from urdf2mjcf.physics import normalize_urdf_physics, restore_urdf_physics
-from urdf2mjcf.urdf_validation import validate_urdf_physics, validate_urdf_structure
+from urdf2mjcf.urdf_validation import (
+    URDFValidationError,
+    validate_urdf_physics,
+    validate_urdf_structure,
+)
 
 
 class URDFConverterBase(ABC):
@@ -26,25 +30,40 @@ class URDFConverterBase(ABC):
         self.assets_dir = Path(assets_dir).expanduser().resolve()
         self.mesh_search_dir = self.urdf_path.parent
         self.last_error: str | None = None
+        self.last_error_codes: tuple[str, ...] = ()
         self.prepared_tree: ET.ElementTree | None = None
         self.mesh_source_map: dict[Path, Path] | None = None
         self.logger = URDF2MJCFLogger.get_logger(type(self).__name__)
 
     def prepare_urdf_tree(self) -> ET.ElementTree:
         """Resolve mesh references without modifying the original URDF."""
+        self.last_error_codes = ()
+        self.prepared_tree = None
         resolver = MeshPathResolver(
             self.mesh_search_dir, self.assets_dir, source_map=self.mesh_source_map
         )
-        tree = ET.parse(self.urdf_path)
+        try:
+            tree = ET.parse(self.urdf_path)
+        except (OSError, ET.ParseError):
+            self.last_error_codes = ("invalid_input",)
+            raise
         if tree.getroot().tag != "robot":
             raise ValueError("Expected a <robot> root element in the URDF")
-        validate_urdf_structure(tree.getroot())
-        validate_urdf_physics(tree.getroot())
+        try:
+            validate_urdf_structure(tree.getroot())
+            validate_urdf_physics(tree.getroot())
+        except URDFValidationError as exc:
+            self.last_error_codes = tuple(issue["code"] for issue in exc.issues)
+            raise
         normalize_urdf_physics(tree.getroot())
         changed = 0
         for elem in tree.getroot().iter("mesh"):
             old = elem.get("filename", elem.get("file", ""))
-            new = resolver.resolve(old).as_posix()
+            try:
+                new = resolver.resolve(old).as_posix()
+            except (OSError, ValueError):
+                self.last_error_codes = ("unresolved_mesh",)
+                raise
             # Both upstream importers require the canonical URDF attribute.
             elem.set("filename", new)
             elem.attrib.pop("file", None)
@@ -75,6 +94,7 @@ class URDF2MJCFConverter(URDFConverterBase):
         """Convert URDF to MJCF using urdf2mjcf"""
         successful = False
         self.last_error = None
+        self.last_error_codes = ()
         try:
             self.logger.info("Converting URDF to MJCF using urdf2mjcf...")
             self.output_dir.mkdir(parents=True, exist_ok=True)
