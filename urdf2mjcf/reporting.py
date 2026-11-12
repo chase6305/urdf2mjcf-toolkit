@@ -6,11 +6,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
+def _input_path(source: str | Path) -> Path:
+    source = Path(source).expanduser()
+    try:
+        return source.resolve()
+    except (OSError, RuntimeError):
+        # Reporting must still work when the input itself is an unreadable or
+        # cyclic symlink. Opening/validating it will supply the actual error.
+        return source.absolute()
+
+
 def new_report(kind: str, source: str | Path, backend: str) -> dict:
     return {
         "schema_version": 1,
         "kind": kind,
-        "input": str(Path(source).expanduser().resolve()),
+        "input": str(_input_path(source)),
         "requested_backend": backend,
         "status": "running",
         "stage": "initialization",
@@ -20,7 +30,7 @@ def new_report(kind: str, source: str | Path, backend: str) -> dict:
 
 def validate_report_path(path: str | Path, source: str | Path) -> Path:
     destination = Path(path).expanduser().resolve()
-    if destination == Path(source).expanduser().resolve():
+    if destination == _input_path(source):
         raise ValueError("Report path must not overwrite the input file")
     if destination.suffix.lower() != ".json":
         raise ValueError("Report path must have a .json extension")

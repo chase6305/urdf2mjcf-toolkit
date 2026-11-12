@@ -8,7 +8,9 @@ from urdf2mjcf.urdf_to_mjcf_converter import URDF2MJCFConverter
 
 def _converter(tmp_path):
     source = tmp_path / "robot.urdf"
-    source.write_text('<robot name="test" />', encoding="utf-8")
+    source.write_text(
+        '<robot name="test"><link name="base"/></robot>', encoding="utf-8"
+    )
     return URDF2MJCFConverter(source, tmp_path / "output", tmp_path / "assets")
 
 
@@ -67,7 +69,8 @@ def test_staged_urdf_prefers_converted_obj(tmp_path, monkeypatch):
 
 def test_subprocess_paths_are_absolute_and_staging_is_cleaned(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    Path("robot.urdf").write_text('<robot name="test" />')
+    original = '<robot name="test"><link name="base"/></robot>'
+    Path("robot.urdf").write_text(original)
     converter = URDF2MJCFConverter(
         Path("robot.urdf"), Path("output"), Path("output/assets")
     )
@@ -84,13 +87,13 @@ def test_subprocess_paths_are_absolute_and_staging_is_cleaned(tmp_path, monkeypa
     monkeypatch.setattr(converter_module.subprocess, "run", fake_run)
     assert converter.convert()
     assert not staged[0].exists()
-    assert Path("robot.urdf").read_text() == '<robot name="test" />'
+    assert Path("robot.urdf").read_text() == original
 
 
 def test_missing_mesh_fails_before_external_command(tmp_path, monkeypatch):
     converter = _converter(tmp_path)
     converter.urdf_path.write_text(
-        '<robot><link><visual><geometry><mesh filename="missing.obj" /></geometry></visual></link></robot>'
+        '<robot><link name="base"><visual><geometry><mesh filename="missing.obj" /></geometry></visual></link></robot>'
     )
     calls = []
     monkeypatch.setattr(

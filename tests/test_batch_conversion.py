@@ -199,3 +199,95 @@ def test_batch_cli_auto_fallback_and_shared_options(tmp_path, monkeypatch):
     assert result["options"]["export_collision"] is True
     assert result["options"]["auto_recalculate_inertia"] is False
     assert Path(result["output"]).is_file()
+
+
+@pytest.mark.parametrize("reader, writer", [("a", "b"), ("b", "a")])
+@pytest.mark.parametrize("reference", ["absolute", "relative", "symlink"])
+def test_batch_protects_mesh_inputs_from_other_jobs(
+    tmp_path, reader, writer, reference
+):
+    import trimesh
+
+    inputs = tmp_path / "models"
+    output = inputs / "converted"
+    mesh = output / writer / "meshes/source.obj"
+    mesh.parent.mkdir(parents=True)
+    trimesh.creation.box(extents=[1, 2, 3]).export(mesh)
+    if reference == "absolute":
+        filename = str(mesh)
+    elif reference == "relative":
+        filename = mesh.relative_to(inputs).as_posix()
+    else:
+        alias = inputs / "source.obj"
+        alias.symlink_to(mesh)
+        filename = alias.name
+    _source(inputs, f"{writer}.urdf")
+    _source(
+        inputs,
+        f"{reader}.urdf",
+        ROBOT.replace('<box size="1 1 1"/>', f'<mesh filename="{filename}"/>'),
+    )
+    before = {p: p.read_bytes() for p in inputs.rglob("*") if p.is_file()}
+    report = BatchConversionManager(inputs, output, backend="mujoco").run()
+    assert report["status"] == "failed"
+    assert report["stage"] == "discovery"
+    assert "would replace an input mesh" in report["error"]
+    assert str(mesh) in report["error"]
+    assert report["results"] == []
+    assert before == {p: p.read_bytes() for p in inputs.rglob("*") if p.is_file()}
+    assert not (output / reader).exists()
+    check = BatchConversionManager(inputs, output, check_only=True).run()
+    assert check["status"] == "success"
+
+
+def test_batch_protects_symlinked_urdf_inside_another_jobs_assets(tmp_path):
+    inputs = tmp_path / "models"
+    output = tmp_path / "converted"
+    original = _source(output, "a/meshes/original.urdf")
+    _source(inputs, "a.urdf")
+    (inputs / "b.urdf").symlink_to(original)
+    before = original.read_bytes()
+    report = BatchConversionManager(inputs, output, backend="mujoco").run()
+    assert report["status"] == "failed"
+    assert report["stage"] == "discovery"
+    assert "would replace an input URDF" in report["error"]
+    assert original.read_bytes() == before
+    assert report["results"] == []
+
+
+def test_batch_can_read_previous_assets_that_no_job_replaces(tmp_path):
+    import trimesh
+
+    inputs = tmp_path / "models"
+    output = tmp_path / "converted"
+    mesh = output / "shared/meshes/source.obj"
+    mesh.parent.mkdir(parents=True)
+    trimesh.creation.box().export(mesh)
+    original = mesh.read_bytes()
+    _source(
+        inputs,
+        "robot.urdf",
+        ROBOT.replace('<box size="1 1 1"/>', f'<mesh filename="{mesh}"/>'),
+    )
+    report = BatchConversionManager(inputs, output, backend="mujoco").run()
+    assert report["status"] == "success"
+    assert mesh.read_bytes() == original
+    assert mujoco.MjModel.from_xml_path(report["results"][0]["output"]).nmesh == 1
+
+
+@pytest.mark.parametrize("nested_output", [False, True])
+@pytest.mark.parametrize("check_only", [False, True])
+def test_unreadable_source_symlink_does_not_abort_other_batch_jobs(
+    tmp_path, nested_output, check_only
+):
+    inputs = tmp_path / "models"
+    _source(inputs, "valid.urdf")
+    (inputs / "loop.urdf").symlink_to("loop.urdf")
+    output = (inputs if nested_output else tmp_path) / "converted"
+    report = BatchConversionManager(
+        inputs, output, backend="mujoco", check_only=check_only
+    ).run()
+    assert report["status"] == "failed"
+    assert report["stage"] == "completed"
+    assert report["summary"] == {"total": 2, "succeeded": 1, "failed": 1, "skipped": 0}
+    assert (output / "valid/valid.xml").is_file() is not check_only

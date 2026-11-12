@@ -1,10 +1,94 @@
-"""Shared, read-only diagnostics for URDF physical parameters."""
+"""Shared, read-only diagnostics for URDF structure and physical parameters."""
 
 import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict, deque
 
 import numpy as np
 
 from urdf2mjcf.physics import origin_transform, validate_inertial, vector
+
+
+def topology_issues(robot: ET.Element) -> tuple[list[dict], list[str]]:
+    """Return structural errors and sorted root names without recursive traversal.
+
+    Importers differ in whether they reject malformed graphs, accept multiple
+    roots, or silently discard disconnected links. Enforce a single URDF tree
+    before either importer can interpret it.
+    """
+    issues = []
+
+    def issue(code, message, **context):
+        issues.append(
+            {"severity": "error", "code": code, "message": message, **context}
+        )
+
+    links, joints = robot.findall("link"), robot.findall("joint")
+    for kind, elements in (("link", links), ("joint", joints)):
+        names = Counter(element.get("name", "") for element in elements)
+        for name, count in names.items():
+            if not name.strip():
+                issue("missing_name", f"{kind} is missing a name", element=kind)
+            elif count > 1:
+                issue("duplicate_name", f"Duplicate {kind} name: {name}", element=kind)
+    link_names = {link.get("name") for link in links if link.get("name", "").strip()}
+    if not links:
+        issue("missing_links", "URDF contains no links")
+    children = defaultdict(list)
+    indegree = dict.fromkeys(link_names, 0)
+    for joint in joints:
+        endpoints = {}
+        for role in ("parent", "child"):
+            elements = joint.findall(role)
+            if len(elements) != 1:
+                issue(
+                    "invalid_joint_link",
+                    f"Joint {joint.get('name')!r} must contain exactly one {role} element",
+                    joint=joint.get("name"),
+                    element=role,
+                )
+            name = elements[0].get("link") if elements else None
+            endpoints[role] = name
+            if name not in link_names:
+                issue(
+                    "invalid_joint_link",
+                    f"Joint {joint.get('name')!r} has unknown {role} link: {name!r}",
+                    joint=joint.get("name"),
+                    element=role,
+                )
+        parent, child = endpoints["parent"], endpoints["child"]
+        if parent in link_names and child in link_names:
+            children[parent].append(child)
+            indegree[child] += 1
+    for name, count in sorted(indegree.items()):
+        if count > 1:
+            issue(
+                "multiple_parents",
+                f"Link {name!r} has {count} parent joints",
+                link=name,
+            )
+    roots = sorted(name for name, count in indegree.items() if count == 0)
+    if links and len(roots) != 1:
+        issue("invalid_roots", f"Expected one root link, found {len(roots)}: {roots}")
+    queue = deque(roots)
+    visited = 0
+    while queue:
+        visited += 1
+        for child in children[queue.popleft()]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
+    if visited < len(link_names):
+        issue("joint_cycle", "Joint graph contains a cycle")
+    return issues, roots
+
+
+def validate_urdf_structure(robot: ET.Element) -> None:
+    """Reject malformed graphs consistently with read-only inspection."""
+    issues, _ = topology_issues(robot)
+    if issues:
+        raise ValueError(
+            "; ".join(f"[{issue['code']}] {issue['message']}" for issue in issues)
+        )
 
 
 def physical_issues(robot: ET.Element) -> list[dict]:

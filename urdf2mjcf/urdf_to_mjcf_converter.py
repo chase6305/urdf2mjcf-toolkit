@@ -13,7 +13,7 @@ from pathlib import Path
 from urdf2mjcf.asset_paths import MeshPathResolver
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.physics import normalize_urdf_physics, restore_urdf_physics
-from urdf2mjcf.urdf_validation import validate_urdf_physics
+from urdf2mjcf.urdf_validation import validate_urdf_physics, validate_urdf_structure
 
 
 class URDFConverterBase(ABC):
@@ -37,6 +37,7 @@ class URDFConverterBase(ABC):
         tree = ET.parse(self.urdf_path)
         if tree.getroot().tag != "robot":
             raise ValueError("Expected a <robot> root element in the URDF")
+        validate_urdf_structure(tree.getroot())
         validate_urdf_physics(tree.getroot())
         normalize_urdf_physics(tree.getroot())
         changed = 0

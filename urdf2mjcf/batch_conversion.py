@@ -84,7 +84,13 @@ class BatchConversionManager:
         )
 
         def is_output(path):
-            return exclude_output and path.resolve().is_relative_to(self.output_dir)
+            if not exclude_output:
+                return False
+            try:
+                return path.resolve().is_relative_to(self.output_dir)
+            except (OSError, RuntimeError):
+                # A bad file symlink is a model failure, not a discovery failure.
+                return False
 
         sources = []
         for current, children, files in os.walk(self.input_dir, onerror=scan_error):
@@ -129,7 +135,42 @@ class BatchConversionManager:
                     raise ValueError(
                         f"Overlapping model outputs: {destinations[parent]} and {source}"
                     )
+        self._validate_source_dependencies(jobs)
         return jobs
+
+    def _validate_source_dependencies(self, jobs: list[tuple[Path, Path]]) -> None:
+        """Protect every job's inputs from every other job's publication.
+
+        A single-model manager can only check its own output. A batch must also
+        reject references into another model's replaced asset tree before the
+        first job runs, regardless of processing order or source symlinks.
+        """
+        asset_trees = {(destination / "meshes").resolve() for _, destination in jobs}
+        resolved_sources = {}
+        model_files = set()
+        for source, destination in jobs:
+            try:
+                resolved = source.resolve()
+            except (OSError, RuntimeError):
+                continue  # The per-job error must not stop unrelated models.
+            resolved_sources[source] = resolved
+            model_files.add(destination / f"{resolved.stem}.xml")
+
+        def protect(path: Path, kind: str, source: Path) -> None:
+            if path in model_files or any(
+                parent in asset_trees for parent in path.parents
+            ):
+                raise ValueError(
+                    f"Batch output would replace an input {kind}: {path} (used by {source})"
+                )
+
+        for source, resolved in resolved_sources.items():
+            protect(resolved, "URDF", source)
+            # Inspection retains resolved references even if other declarations
+            # are invalid. Such model errors still belong to per-job reports.
+            for mesh in inspect_urdf(source, backend=self.backend)["meshes"]:
+                if mesh["resolved_path"] is not None:
+                    protect(Path(mesh["resolved_path"]), "mesh", source)
 
     def _run_one(self, source: Path, destination: Path) -> dict:
         started = time.perf_counter()

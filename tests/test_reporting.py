@@ -147,3 +147,22 @@ def test_failed_report_write_preserves_previous_json(tmp_path, monkeypatch):
         write_report({"status": "success"}, report_path)
     assert json.loads(report_path.read_text()) == {"status": "previous"}
     assert list(tmp_path.iterdir()) == [report_path]
+
+
+@pytest.mark.parametrize("check", [True, False])
+def test_cli_can_report_an_input_symlink_loop(tmp_path, monkeypatch, check):
+    source = tmp_path / "loop.urdf"
+    source.symlink_to(source.name)
+    report_path = tmp_path / "failure.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["toolkit", str(source), "--report", str(report_path)]
+        + (["--check"] if check else []),
+    )
+    assert manager_module.main() == 1
+    report = json.loads(report_path.read_text())
+    assert report["status"] == "failed"
+    assert report["input"] == str(source)
+    assert source.is_symlink()
+    assert set(tmp_path.iterdir()) == {source, report_path}
