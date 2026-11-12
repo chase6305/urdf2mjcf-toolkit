@@ -1,8 +1,9 @@
 """Keep source mesh files distinct across upstream basename-based importers."""
 
+import copy
 import hashlib
+import shutil
 import xml.etree.ElementTree as ET
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -102,67 +103,40 @@ def restore_external_mesh_references(
     asset.extend(registry.values())
 
 
-def restore_native_mesh_references(spec, urdf: ET.Element, assets_dir: Path) -> None:
-    """Repair MuJoCo's reuse of equal basenames before compiling the spec.
+def prepare_native_mesh_aliases(
+    tree: ET.ElementTree, alias_dir: Path, assets_dir: Path
+) -> tuple[ET.ElementTree, dict[str, str]]:
+    """Give every (source file, scale) pair a unique native importer basename.
 
-    Native URDF import compares mesh basenames and scales without comparing the
-    file paths. Rebuild the bindings when distinct sources would be conflated,
-    including collisions between native scale suffixes and real source names.
+    The importer can reject scale-generated names during parsing, before a spec
+    is available for repair. Scoped aliases prevent both those collisions and
+    basename-based reuse. Hardlinks avoid copying large meshes when possible;
+    the fallback copies bytes without loading the whole file into memory.
+    The spec's filenames are restored to the original files before serialization.
     """
-    sources_by_stem = defaultdict(set)
-    for mesh in urdf.findall("link/visual/geometry/mesh") + urdf.findall(
+    aliased = ET.ElementTree(copy.deepcopy(tree.getroot()))
+    assets_dir = Path(assets_dir).resolve()
+    registry = {}
+    filenames = {}
+    occupied = set()
+    for mesh in aliased.findall("link/visual/geometry/mesh") + aliased.findall(
         "link/collision/geometry/mesh"
     ):
         filename = Path(mesh.get("filename"))
-        sources_by_stem[filename.stem].add(filename)
-    previous = list(spec.meshes)
-    occupied = {mesh.name for mesh in previous}
-    if not any(len(paths) > 1 for paths in sources_by_stem.values()) and len(
-        occupied
-    ) == len(previous):
-        return
-    assets_dir = Path(assets_dir).resolve()
-    registry = {}
-    for link in urdf.findall("link"):
-        for kind in ("visual", "collision"):
-            sources = link.findall(kind)
-            if not any(source.find("geometry/mesh") is not None for source in sources):
-                continue
-            body = spec.body(link.get("name"))
-            if body is None:
-                raise ValueError(
-                    f"Imported model is missing mesh link: {link.get('name')}"
-                )
-            targets = [
-                geom
-                for geom in body.geoms
-                if (geom.contype == 0 and geom.conaffinity == 0) == (kind == "visual")
-            ]
-            if len(sources) != len(targets):
-                raise ValueError(
-                    f"Imported {kind} count differs for link {link.get('name')!r}"
-                )
-            for source, target in zip(sources, targets, strict=True):
-                mesh = source.find("geometry/mesh")
-                if mesh is None:
-                    continue
-                filename = Path(mesh.get("filename"))
-                scale = vector(mesh.get("scale", "1 1 1"))
-                key = (filename, tuple(scale))
-                if key not in registry:
-                    name = _mesh_name(filename, assets_dir, scale, occupied)
-                    registry[key] = spec.add_mesh(
-                        name=name, file=filename.as_posix(), scale=scale
-                    )
-                target.meshname = registry[key].name
-    # Old assets now have no users. Give them unique temporary names in case
-    # the native importer generated a scale suffix equal to another filename.
-    for index, mesh in enumerate(previous):
-        name = f"_urdf2mjcf_unused_{index}"
-        while name in occupied:
-            name += "_"
-        occupied.add(name)
-        mesh.name = name
+        scale = vector(mesh.get("scale", "1 1 1"))
+        key = (filename, tuple(scale))
+        if key not in registry:
+            name = _mesh_name(filename, assets_dir, scale, occupied)
+            alias = alias_dir / f"{name}{filename.suffix.lower()}"
+            alias_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                alias.hardlink_to(filename)
+            except OSError:
+                shutil.copy2(filename, alias)
+            registry[key] = alias
+            filenames[name] = filename.as_posix()
+        mesh.set("filename", registry[key].as_posix())
+    return aliased, filenames
 
 
 def remove_unused_mesh_assets(mjcf: ET.Element) -> None:

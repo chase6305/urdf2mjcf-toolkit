@@ -142,7 +142,8 @@ def test_native_scale_suffix_cannot_collide_with_another_source_filename(tmp_pat
         tmp_path / "robot.urdf",
         '<visual><geometry><mesh filename="arm.obj"/></geometry></visual>'
         '<visual><origin xyz="1 0 0"/><geometry><mesh filename="arm.obj" scale="2 1 1"/></geometry></visual>'
-        '<visual><origin xyz="2 0 0"/><geometry><mesh filename="arm1.obj"/></geometry></visual>',
+        '<visual><origin xyz="2 0 0"/><geometry><mesh filename="arm1.obj"/></geometry></visual>'
+        '<visual><origin xyz="3 0 0"/><geometry><mesh filename="arm.obj" scale="2 1 1"/></geometry></visual>',
     )
     manager = MujocoConversionManager(source, tmp_path / "output", backend="mujoco")
     model = mujoco.MjModel.from_xml_path(str(manager.run()))
@@ -156,7 +157,34 @@ def test_native_scale_suffix_cannot_collide_with_another_source_filename(tmp_pat
         ),
         key=lambda bound: bound.mean(axis=0)[0],
     )
-    assert len(bounds) == 3
-    for index, (bound, width) in enumerate(zip(bounds, [0.1, 0.2, 0.4], strict=True)):
+    assert len(bounds) == 4
+    for index, (bound, width) in enumerate(
+        zip(bounds, [0.1, 0.2, 0.4, 0.2], strict=True)
+    ):
         np.testing.assert_allclose(bound.mean(axis=0), [index, 0, 0], atol=2e-6)
         np.testing.assert_allclose(bound[1] - bound[0], [width, 0.2, 0.3], atol=2e-6)
+
+
+def test_native_aliases_fall_back_to_copying_and_leave_no_temporary_files(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    mesh = tmp_path / "shape.obj"
+    trimesh.creation.box().export(mesh)
+    original = mesh.read_bytes()
+    source = _robot(
+        tmp_path / "robot.urdf",
+        '<visual><geometry><mesh filename="shape.obj"/></geometry></visual>',
+    )
+
+    def unsupported(*args, **kwargs):
+        raise OSError("Hardlinks unavailable across filesystems")
+
+    monkeypatch.setattr(Path, "hardlink_to", unsupported)
+    manager = MujocoConversionManager(source, tmp_path / "output", backend="mujoco")
+    output = manager.run()
+    assert mujoco.MjModel.from_xml_path(str(output)).nmesh == 1
+    assert mesh.read_bytes() == original
+    assert {p.name for p in manager.output_dir.iterdir()} == {"meshes", "robot.xml"}
+    assert not list(manager.meshes_dir.rglob("mesh-aliases"))

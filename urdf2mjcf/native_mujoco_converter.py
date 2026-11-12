@@ -5,8 +5,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from urdf2mjcf.mesh_identity import (
+    prepare_native_mesh_aliases,
     remove_unused_mesh_assets,
-    restore_native_mesh_references,
 )
 from urdf2mjcf.physics import restore_urdf_physics
 from urdf2mjcf.urdf_to_mjcf_converter import URDFConverterBase
@@ -42,9 +42,13 @@ class NativeMujocoConverter(URDFConverterBase):
                 prefix="native-", dir=self.output_dir
             ) as staging:
                 source = Path(staging) / self.urdf_path.name
-                tree.write(source, encoding="utf-8", xml_declaration=True)
+                aliased, filenames = prepare_native_mesh_aliases(
+                    tree, Path(staging) / "mesh-aliases", self.assets_dir
+                )
+                aliased.write(source, encoding="utf-8", xml_declaration=True)
                 spec = mujoco.MjSpec.from_file(str(source))
-                restore_native_mesh_references(spec, tree.getroot(), self.assets_dir)
+                for mesh in spec.meshes:
+                    mesh.file = filenames[mesh.name]
                 result = ET.fromstring(spec.to_xml())
                 remove_unused_mesh_assets(result)
                 restore_urdf_physics(result, tree.getroot())
