@@ -102,11 +102,12 @@ class BatchConversionManager:
                 and not (directory / name).is_symlink()
                 and not is_output(directory / name)
             )
+            # Output directories are pruned above. A file alias outside that
+            # subtree remains an input and must reach dependency protection.
             sources.extend(
                 directory / name
                 for name in files
                 if Path(name).suffix.lower() == ".urdf"
-                and not is_output(directory / name)
             )
         if not sources:
             raise ValueError(f"No URDF files found in: {self.input_dir}")

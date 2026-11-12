@@ -48,6 +48,41 @@ def test_mesh_symlink_loop_does_not_abort_other_batch_jobs(tmp_path, check_only)
         assert mujoco.MjModel.from_xml_path(str(output / "b/b.xml")).nbody == 2
 
 
+@pytest.mark.parametrize("check_only", [False, True])
+def test_file_alias_into_nested_output_is_protected_as_an_input(tmp_path, check_only):
+    inputs = tmp_path / "models"
+    output = inputs / "converted"
+    _source(inputs, "a.urdf")
+    original_source = _source(output, "a/meshes/original.urdf")
+    alias = inputs / "b.urdf"
+    alias.symlink_to(original_source)
+    before = {path: path.read_bytes() for path in inputs.rglob("*") if path.is_file()}
+    report = BatchConversionManager(
+        inputs, output, backend="mujoco", check_only=check_only
+    ).run()
+    if check_only:
+        assert report["status"] == "success"
+        assert report["summary"] == {
+            "total": 2,
+            "succeeded": 2,
+            "failed": 0,
+            "skipped": 0,
+        }
+        assert [result["relative_input"] for result in report["results"]] == [
+            "a.urdf",
+            "b.urdf",
+        ]
+    else:
+        assert report["status"] == "failed"
+        assert report["stage"] == "discovery"
+        assert "would replace an input URDF" in report["error"]
+        assert report["results"] == []
+    assert alias.is_symlink() and alias.read_bytes() == original_source.read_bytes()
+    assert before == {
+        path: path.read_bytes() for path in inputs.rglob("*") if path.is_file()
+    }
+
+
 def test_batch_converts_same_named_models_and_continues_after_failure(tmp_path):
     inputs = tmp_path / "models"
     first = _source(inputs, "a/robot.urdf")

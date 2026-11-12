@@ -170,6 +170,8 @@ By default, a failed model is recorded and processing continues. `--fail-fast` m
 
 The batch command supports the single-model backend, base, collision, inertia, check, report, and logging options. `--check` produces no conversion assets. Directory symlinks are not traversed, and the selected output subtree is excluded when it lies inside the input tree. Conversion rejects an output root equal to or containing the input directory, model output paths that escape the output root, and colliding/nested job outputs before creating conversion directories. For example, `a.urdf` and `a/b.urdf` would both write under `converted/a`; give these inputs distinct paths before converting them together. This output-layout restriction does not apply to check-only runs.
 
+URDF file symlinks outside the selected output subtree remain inputs, even when they point into an earlier output. Conversion preflight protects those targets from replacement by any batch job; check mode can inspect the aliases without modifying them.
+
 Batch planning also checks whether any job would replace another job's input URDF or referenced mesh, including references through symlinks. Such conflicts fail discovery before any model is converted; move the shared inputs outside the affected output trees. Existing shared assets elsewhere under the output root may still be used. An unreadable input symlink is recorded as a model failure, so unrelated jobs can continue unless `--fail-fast` is set.
 
 Python usage:
