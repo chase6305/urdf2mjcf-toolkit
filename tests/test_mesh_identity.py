@@ -188,3 +188,36 @@ def test_native_aliases_fall_back_to_copying_and_leave_no_temporary_files(
     assert mesh.read_bytes() == original
     assert {p.name for p in manager.output_dir.iterdir()} == {"meshes", "robot.xml"}
     assert not list(manager.meshes_dir.rglob("mesh-aliases"))
+
+
+@pytest.mark.parametrize("backend", ["mujoco", "urdf2mjcf"])
+def test_missing_absolute_mesh_cannot_use_an_unrelated_visual_on_rerun(
+    tmp_path, backend
+):
+    visual = tmp_path / "meshes/visual/arm.obj"
+    visual.parent.mkdir(parents=True)
+    trimesh.creation.box().export(visual)
+    source = _robot(
+        tmp_path / "robot.urdf",
+        '<visual><geometry><mesh filename="meshes/visual/arm.obj"/></geometry></visual>',
+    )
+    manager = MujocoConversionManager(source, tmp_path / "output", backend=backend)
+    manager.run()
+    previous = {
+        p.relative_to(manager.output_dir): p.read_bytes()
+        for p in manager.output_dir.rglob("*")
+        if p.is_file()
+    }
+    _robot(
+        source,
+        f'<visual><geometry><mesh filename="{tmp_path / "missing/arm.obj"}"/></geometry></visual>',
+    )
+    original = source.read_bytes()
+    with pytest.raises(RuntimeError, match="explicit path"):
+        manager.run()
+    assert source.read_bytes() == original
+    assert previous == {
+        p.relative_to(manager.output_dir): p.read_bytes()
+        for p in manager.output_dir.rglob("*")
+        if p.is_file()
+    }

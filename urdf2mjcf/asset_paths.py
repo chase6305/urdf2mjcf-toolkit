@@ -59,6 +59,17 @@ class MeshPathResolver:
                 if parent.name == package:
                     source_candidates.append(parent / path)
                 source_candidates.append(parent / package / path)
+        # Explicit absolute/file-URI and parent-directory references identify a
+        # specific source. A missing one must not select a same-named local
+        # mesh through the compatibility basename fallback below.
+        if (
+            not package
+            and (path.is_absolute() or ".." in path.parts)
+            and not any(candidate.is_file() for candidate in source_candidates)
+        ):
+            raise FileNotFoundError(
+                f"Mesh file not found at explicit path: {reference}"
+            )
         if self.source_map is not None or not self.prefer_converted:
             for candidate in source_candidates:
                 if candidate.is_file():

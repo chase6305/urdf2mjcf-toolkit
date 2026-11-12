@@ -121,3 +121,26 @@ def test_package_identity_is_not_replaced_by_local_same_named_mesh(tmp_path):
     assert resolver.resolve("package://package_b/meshes/visual/arm.obj") == other
     with pytest.raises(FileNotFoundError, match="package_c"):
         resolver.resolve("package://package_c/meshes/visual/arm.obj")
+
+
+@pytest.mark.parametrize("reference_kind", ["absolute", "file_uri", "parent"])
+@pytest.mark.parametrize("prefer_converted", [False, True])
+def test_missing_explicit_path_cannot_use_an_unrelated_basename(
+    tmp_path, reference_kind, prefer_converted
+):
+    source_dir = tmp_path / "robot"
+    source_dir.mkdir()
+    assets = tmp_path / "assets"
+    staged = assets / "visual/arm.obj"
+    staged.parent.mkdir(parents=True)
+    staged.touch()
+    missing = tmp_path / "missing/arm.obj"
+    reference = (
+        str(missing)
+        if reference_kind == "absolute"
+        else missing.as_uri() if reference_kind == "file_uri" else "../missing/arm.obj"
+    )
+    with pytest.raises(FileNotFoundError, match="explicit path"):
+        MeshPathResolver(source_dir, assets, prefer_converted=prefer_converted).resolve(
+            reference
+        )
