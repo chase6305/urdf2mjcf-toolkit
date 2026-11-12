@@ -15,6 +15,35 @@ from urdf2mjcf.obj_to_mjcf_converter import OBJ2MJCFImporter
 from urdf2mjcf.urdf_to_mujoco_converter import MujocoConversionManager
 
 
+@pytest.mark.parametrize("keep_helpers", [False, True])
+def test_external_backend_works_with_toolkit_checkout_on_pythonpath(
+    tmp_path, monkeypatch, keep_helpers
+):
+    import urdf2mjcf.urdf_to_mjcf_converter as converter_module
+
+    checkout = str(Path(converter_module.__file__).resolve().parent.parent)
+    helpers = tmp_path / "user_helpers"
+    helpers.mkdir()
+    pythonpath = os.pathsep.join([checkout, str(helpers)]) if keep_helpers else checkout
+    monkeypatch.setenv("PYTHONPATH", pythonpath)
+    monkeypatch.setenv(
+        "PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+    )
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        '<robot name="pythonpath"><link name="body"><inertial><mass value="1"/>'
+        '<inertia ixx="1" iyy="1" izz="1"/></inertial>'
+        '<visual><geometry><box size="1 1 1"/></geometry></visual></link></robot>'
+    )
+    manager = MujocoConversionManager(source, tmp_path / "output", backend="urdf2mjcf")
+
+    model = mujoco.MjModel.from_xml_path(str(manager.run()))
+
+    np.testing.assert_allclose(model.body("body").mass, [1])
+    assert manager.last_backend == "urdf2mjcf"
+    assert os.environ["PYTHONPATH"] == pythonpath
+
+
 def test_old_xml_cannot_replace_fresh_glb_geometry(tmp_path):
     visual = tmp_path / "meshes/visual"
     stale = visual / "paint"

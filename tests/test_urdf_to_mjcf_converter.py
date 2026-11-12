@@ -1,6 +1,9 @@
+import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import urdf2mjcf.urdf_to_mjcf_converter as converter_module
 from urdf2mjcf.physics import rename_reserved_body_names
@@ -45,6 +48,37 @@ def _converter(tmp_path):
         '<robot name="test"><link name="base"/></robot>', encoding="utf-8"
     )
     return URDF2MJCFConverter(source, tmp_path / "output", tmp_path / "assets")
+
+
+@pytest.mark.parametrize("kind", ["checkout", "relative_checkout", "combined_install"])
+def test_child_pythonpath_does_not_shadow_the_upstream_converter(
+    tmp_path, monkeypatch, kind
+):
+    converter = _converter(tmp_path)
+    checkout = converter.assets_dir / "checkout"
+    package = checkout / "urdf2mjcf"
+    package.mkdir(parents=True)
+    (package / "__init__.py").touch()
+    (package / "urdf_to_mjcf_converter.py").touch()
+    helpers = tmp_path / "user_helpers"
+    helpers.mkdir()
+    if kind == "combined_install":
+        (package / "convert.py").touch()
+    entry = "checkout" if kind == "relative_checkout" else str(checkout)
+    original = os.pathsep.join([entry, str(helpers)])
+    monkeypatch.setenv("PYTHONPATH", original)
+    monkeypatch.setenv("URDF2MJCF_TEST_SETTING", "preserved")
+
+    def run(*args, **kwargs):
+        expected = original if kind == "combined_install" else str(helpers)
+        assert kwargs["env"]["PYTHONPATH"] == expected
+        assert kwargs["env"]["URDF2MJCF_TEST_SETTING"] == "preserved"
+        converter.output_xml.write_text('<mujoco model="fresh"/>')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(converter_module.subprocess, "run", run)
+    assert converter.convert()
+    assert os.environ["PYTHONPATH"] == original
 
 
 def test_success_without_fresh_output_is_rejected(tmp_path, monkeypatch):
