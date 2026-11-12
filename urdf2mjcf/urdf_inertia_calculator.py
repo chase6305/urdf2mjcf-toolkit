@@ -4,9 +4,10 @@ Calculate inertia properties in URDF using Trimesh library
 """
 
 import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -17,7 +18,16 @@ try:
 except ImportError:
     TRIMESH_AVAILABLE = False
 
+from urdf2mjcf.asset_paths import MeshPathResolver
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.physics import (
+    numbers,
+    origin_transform,
+    validate_inertia_tensor,
+    validate_inertial,
+    vector,
+)
+from urdf2mjcf.urdf_validation import URDFValidationError, declaration_issues
 
 
 class URDFInertiaCalculator:
@@ -27,12 +37,12 @@ class URDFInertiaCalculator:
         self,
         urdf_path: Path,
         geometry_preference: str = "visual",
-        density: Optional[float] = None,
+        density: float | None = None,
         scale: float = 1.0,
         regularize_rel_tol: float = 1e-6,
         regularize_abs_tol: float = 1e-8,
-        enforce_min_eig: Optional[float] = None,
-        mesh_search_dir: Optional[Path] = None,
+        enforce_min_eig: float | None = None,
+        mesh_search_dir: Path | None = None,
     ):
         """
         Initialize calculator
@@ -44,10 +54,20 @@ class URDFInertiaCalculator:
             scale: Mesh scaling factor
         """
         self.urdf_path = Path(urdf_path)
-        self.urdf_dir = Path(mesh_search_dir) if mesh_search_dir else self.urdf_path.parent
+        self.urdf_dir = (
+            Path(mesh_search_dir) if mesh_search_dir else self.urdf_path.parent
+        )
         self.geometry_preference = geometry_preference
         self.density = density
         self.scale = scale
+        self.last_error: str | None = None
+        self.updated_links: list[str] = []
+        for name, value in (("scale", scale), ("density", density)):
+            if value is not None and (not np.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be finite and positive")
+        self._validate_regularization_parameters(
+            regularize_rel_tol, regularize_abs_tol, enforce_min_eig
+        )
         # Regularization tolerances for inertia positive-definite enforcement
         self.regularize_rel_tol = regularize_rel_tol
         self.regularize_abs_tol = regularize_abs_tol
@@ -70,112 +90,60 @@ class URDFInertiaCalculator:
             f"Geometry preference: {geometry_preference}, Density: {density}, Scale: {scale}"
         )
 
+    def _mesh_properties(self, mesh_path: Path, scale=1.0) -> dict:
+        if not TRIMESH_AVAILABLE:
+            raise RuntimeError("Trimesh is required for mesh inertia calculation")
+        mesh = trimesh.load(mesh_path)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.to_mesh()
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise ValueError(f"Mesh contains no triangle geometry: {mesh_path}")
+        scaling = np.broadcast_to(np.asarray(scale, dtype=float), (3,))
+        if not np.all(np.isfinite(scaling)) or np.any(scaling == 0):
+            raise ValueError("Mesh scale must be finite and nonzero")
+        mesh.apply_scale(scaling)
+        if not mesh.is_volume:
+            raise ValueError(
+                f"Inertia requires a closed, consistently wound volume: {mesh_path}"
+            )
+        mesh.density = 1.0
+        properties = mesh.mass_properties
+        return {
+            "volume": float(mesh.volume),
+            "center_mass": np.asarray(properties["center_mass"]),
+            "inertia": np.asarray(properties["inertia"]),
+        }
+
     def calculate_inertia_from_mesh(
         self,
         mesh_path: Path,
         mass: float = 1.0,
-        density: Optional[float] = None,
+        density: float | None = None,
         scale: float = 1.0,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
+        """Compute solid-mesh inertia at its COM, normalized to the supplied mass.
+
+        A uniform density cancels during mass normalization. Open/zero-volume
+        meshes fail explicitly; no placeholder inertia is substituted.
         """
-        Calculate inertia matrix from mesh file while keeping original mass
-
-        Args:
-            mesh_path: Path to mesh file
-            mass: Target mass (keep unchanged)
-            density: Optional density parameter
-            scale: Mesh scaling factor
-
-        Returns:
-            dict: Contains mass and calculated inertia matrix, or None if failed
-        """
-        if not TRIMESH_AVAILABLE:
-            self.logger.warning(
-                "Trimesh not available, cannot calculate inertia from mesh"
-            )
-            return None
-
         try:
-            # Load mesh
-            self.logger.debug(f"Loading mesh file: {mesh_path}")
-            mesh = trimesh.load(mesh_path)
-
-            if isinstance(mesh, trimesh.Scene):
-                # Merge all geometries
-                self.logger.debug("Mesh is a Scene, merging geometries...")
-                all_meshes = list(mesh.geometry.values())
-                if len(all_meshes) == 0:
-                    self.logger.warning(
-                        f"Cannot process mesh file {mesh_path}: Scene has no geometry"
-                    )
-                    return None
-                else:
-                    mesh = trimesh.util.concatenate(all_meshes)
-                    self.logger.debug(f"Merged {len(all_meshes)} geometries")
-
-            if not isinstance(mesh, trimesh.Trimesh):
-                self.logger.warning(
-                    f"Cannot process mesh file {mesh_path}: Not a valid Trimesh"
-                )
-                return None
-
-            # Apply scaling
-            if scale != 1.0:
-                self.logger.debug(f"Applying scale {scale} to mesh")
-                mesh.apply_scale(scale)
-
-            # Set density
-            if density is not None:
-                mesh.density = density
-                self.logger.debug(f"Set density to {density} kg/m³")
-            elif hasattr(mesh, "volume") and mesh.volume > 0:
-                # Calculate density from volume if available
-                mesh.density = mass / mesh.volume
-                self.logger.debug(
-                    f"Calculated density {mesh.density:.2f} kg/m³ from mass {mass:.6f} and volume {mesh.volume:.6e}"
-                )
-            else:
-                # Default density
-                mesh.density = 1000  # kg/m^3
-                self.logger.debug(f"Using default density {mesh.density} kg/m³")
-
-            # Get mass properties
-            mass_properties = mesh.mass_properties
-            self.logger.debug(
-                f"Mesh volume: {mesh.volume:.6e}, Calculated mass: {mass_properties['mass']:.6e}"
-            )
-
-            # Recalculate inertia matrix for target mass
-            # Inertia matrix is proportional to mass, so scale accordingly
-            calculated_mass = mass_properties["mass"]
-            if calculated_mass > 0:
-                # Scale inertia matrix to target mass
-                scale_factor = mass / calculated_mass
-                scaled_inertia = mass_properties["inertia"] * scale_factor
-                self.logger.debug(f"Scaled inertia by factor {scale_factor:.6f}")
-            else:
-                # If mesh has no volume, use default
-                scaled_inertia = np.eye(3) * mass * 1e-3  # Default inertia matrix
-                self.logger.warning(
-                    f"Mesh has zero volume, using default inertia matrix"
-                )
-
-            self.logger.info(f"Successfully calculated inertia for {mesh_path}")
+            if not np.isfinite(mass) or mass <= 0:
+                raise ValueError("Mass must be finite and positive")
+            if density is not None and (not np.isfinite(density) or density <= 0):
+                raise ValueError("Density must be finite and positive")
+            properties = self._mesh_properties(mesh_path, scale)
             return {
-                "mass": mass,  # Keep original mass
-                "center_mass": mass_properties["center_mass"],
-                "inertia": scaled_inertia,  # Scaled inertia matrix
+                "mass": mass,
+                "center_mass": properties["center_mass"],
+                "inertia": properties["inertia"] * (mass / properties["volume"]),
             }
-
-        except Exception as e:
-            self.logger.error(f"Failed to process mesh file {mesh_path}: {e}")
-            import traceback
-
-            self.logger.debug(f"Traceback: {traceback.format_exc()}")
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.logger.error("Cannot calculate inertia: %s", exc)
             return None
 
     @staticmethod
-    def inertia_matrix_to_urdf_params(inertia_matrix: np.ndarray) -> Dict[str, float]:
+    def inertia_matrix_to_urdf_params(inertia_matrix: np.ndarray) -> dict[str, float]:
         """Convert 3x3 inertia matrix to URDF parameters"""
         return {
             "ixx": inertia_matrix[0, 0],
@@ -187,12 +155,24 @@ class URDFInertiaCalculator:
         }
 
     @staticmethod
+    def _validate_regularization_parameters(rel_tol, abs_tol, min_eig) -> None:
+        for name, value in (
+            ("rel_tol", rel_tol),
+            ("abs_tol", abs_tol),
+            ("min_eig", min_eig),
+        ):
+            if name == "min_eig" and value is None:
+                continue
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+
+    @staticmethod
     def regularize_inertia_matrix(
         inertia_matrix: np.ndarray,
         rel_tol: float = 1e-6,
         abs_tol: float = 1e-8,
-        min_eig: Optional[float] = None,
-    ) -> Tuple[np.ndarray, float]:
+        min_eig: float | None = None,
+    ) -> tuple[np.ndarray, float]:
         """Ensure inertia matrix is symmetric positive definite by clamping eigenvalues.
 
         Args:
@@ -203,14 +183,22 @@ class URDFInertiaCalculator:
         Returns:
             (regularized_matrix, min_eig_used)
         """
-        # Symmetrize
-        I = 0.5 * (inertia_matrix + inertia_matrix.T)
+        URDFInertiaCalculator._validate_regularization_parameters(
+            rel_tol, abs_tol, min_eig
+        )
+        matrix = np.asarray(inertia_matrix, dtype=float)
+        if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+            raise ValueError("Inertia matrix must contain nine finite values")
+        matrix = 0.5 * matrix + 0.5 * matrix.T
 
         # Eigen-decomposition
-        eigvals, eigvecs = np.linalg.eigh(I)
+        eigvals, eigvecs = np.linalg.eigh(matrix)
 
-        trace = np.trace(I)
-        min_allowed = max(abs_tol, trace * rel_tol)
+        with np.errstate(over="ignore", invalid="ignore"):
+            relative_min = np.trace(matrix) * rel_tol
+        if not np.isfinite(relative_min):
+            raise ValueError("Regularization threshold is not finite")
+        min_allowed = max(abs_tol, relative_min)
 
         # If caller provided absolute min_eig, use the greater of computed and provided
         if min_eig is not None:
@@ -221,337 +209,240 @@ class URDFInertiaCalculator:
 
         # If eigenvalues already OK, return original
         if np.all(eigvals > min_allowed):
-            return I, min_allowed
+            return matrix, min_allowed
 
         # Clamp eigenvalues
         eigvals_clamped = np.maximum(eigvals, min_allowed)
 
         # Reconstruct
-        I_reg = (eigvecs * eigvals_clamped) @ eigvecs.T
+        with np.errstate(over="ignore", invalid="ignore"):
+            I_reg = (eigvecs * eigvals_clamped) @ eigvecs.T
+        if not np.all(np.isfinite(I_reg)):
+            raise ValueError("Regularized inertia contains non-finite values")
 
         return I_reg, min_allowed
 
     @staticmethod
     def is_valid_inertia_matrix(
         ixx: float, iyy: float, izz: float, ixy: float, ixz: float, iyz: float
-    ) -> Tuple[bool, str]:
-        """Check if inertia matrix is physically valid"""
-        # Build inertia matrix
-        I = np.array([[ixx, ixy, ixz], [ixy, iyy, iyz], [ixz, iyz, izz]])
-
-        # Check if positive definite (all eigenvalues positive)
-        eigenvals = np.linalg.eigvals(I)
-        if np.any(eigenvals <= 0):
-            return False, "Inertia matrix is not positive definite"
-
-        # Check triangle inequalities
-        if not (ixx + iyy >= izz and ixx + izz >= iyy and iyy + izz >= ixx):
-            return False, "Triangle inequality violation"
-
+    ) -> tuple[bool, str]:
+        """Check finite positive principal moments and their triangle inequality."""
+        matrix = np.array([[ixx, ixy, ixz], [ixy, iyy, iyz], [ixz, iyz, izz]])
+        try:
+            validate_inertia_tensor(matrix)
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            return False, str(exc)
         return True, "Valid"
+
+    def _geometries(self, link: ET.Element) -> list[ET.Element]:
+        preferred = [
+            node
+            for node in link.findall(self.geometry_preference)
+            if node.find("geometry") is not None
+        ]
+        if preferred:
+            return preferred
+        fallback = "collision" if self.geometry_preference == "visual" else "visual"
+        return [
+            node for node in link.findall(fallback) if node.find("geometry") is not None
+        ]
 
     def find_mesh_file_for_link(
         self, link_element
-    ) -> Tuple[Optional[Path], Optional[np.ndarray]]:
-        """
-        Extract mesh file path from URDF link element
-
-        Args:
-            link_element: URDF link element
-
-        Returns:
-            Path: Mesh file path, or None if not found
-        """
-        geometry_elements: list[tuple[ET.Element, Optional[ET.Element]]] = []
-
-        def append_geometry(parent: ET.Element) -> None:
-            geometry = parent.find("geometry")
-            if geometry is not None:
-                geometry_elements.append((geometry, parent.find("origin")))
-
-        # Find geometry elements based on preference
-        if self.geometry_preference == "collision":
-            # Prefer collision geometry
-            for collision in link_element.findall("collision"):
-                append_geometry(collision)
-
-            # Fallback to visual geometry if no collision found
-            if not geometry_elements:
-                for visual in link_element.findall("visual"):
-                    append_geometry(visual)
-
-        elif self.geometry_preference == "visual":
-            # Prefer visual geometry
-            for visual in link_element.findall("visual"):
-                append_geometry(visual)
-
-            # Fallback to collision geometry if no visual found
-            if not geometry_elements:
-                for collision in link_element.findall("collision"):
-                    append_geometry(collision)
-
-        # Extract mesh file path and origin
-        for geometry, origin in geometry_elements:
-            mesh = geometry.find("mesh")
+    ) -> tuple[Path | None, np.ndarray | None]:
+        """Return the first mesh for legacy callers, rejecting ambiguous paths."""
+        resolver = MeshPathResolver(
+            self.urdf_dir, self.urdf_dir, prefer_converted=False
+        )
+        for element in self._geometries(link_element):
+            mesh = element.find("geometry/mesh")
             if mesh is not None:
-                filename = mesh.get("filename")
-                origin_xyz = None
-                if origin is not None:
-                    xyz = origin.get("xyz")
-                    if xyz:
-                        try:
-                            parts = [float(x) for x in xyz.strip().split()]
-                            if len(parts) == 3:
-                                origin_xyz = np.array(parts)
-                        except Exception:
-                            origin_xyz = None
-
-                if filename:
-                    normalized_filename = filename.replace("\\", "/")
-                    if normalized_filename.startswith("file://"):
-                        normalized_filename = normalized_filename.removeprefix("file://")
-
-                    mesh_path = Path(normalized_filename)
-                    if not mesh_path.is_absolute():
-                        mesh_path = self.urdf_dir / mesh_path
-                    if mesh_path.exists():
-                        self.logger.debug(f"Found mesh file: {mesh_path}")
-                        return mesh_path, origin_xyz
-                    else:
-                        matches = sorted(
-                            path
-                            for path in self.urdf_dir.rglob(Path(filename).name)
-                            if path.is_file()
-                        )
-                        if len(matches) == 1:
-                            self.logger.info(
-                                f"Found mesh file in subdirectory: {matches[0]}"
-                            )
-                            return matches[0], origin_xyz
-                        if len(matches) > 1:
-                            self.logger.warning(
-                                f"Multiple mesh files match {filename}; using {matches[0]}"
-                            )
-                            return matches[0], origin_xyz
-
-                        self.logger.warning(f"Mesh file not found: {mesh_path}")
-
-        self.logger.warning("No mesh file found for link")
+                path = resolver.resolve(mesh.get("filename", mesh.get("file", "")))
+                return path, origin_transform(element.find("origin"))[:3, 3]
         return None, None
 
-    def update_inertia(self) -> bool:
-        """Update inertia matrix in URDF"""
+    def _geometry_properties(
+        self,
+        element: ET.Element,
+        resolver: MeshPathResolver,
+        mesh_cache: dict | None = None,
+    ) -> dict:
+        geometry = element.find("geometry")
+        if len(geometry) != 1:
+            raise ValueError("Each geometry must contain exactly one shape")
+        shape = geometry[0]
+        center = np.zeros(3)
+        if shape.tag == "mesh":
+            path = resolver.resolve(shape.get("filename", shape.get("file", "")))
+            scale = vector(shape.get("scale", "1 1 1")) * self.scale
+            key = (path, tuple(scale))
+            if mesh_cache is None:
+                properties = self._mesh_properties(path, scale)
+            else:
+                if key not in mesh_cache:
+                    mesh_cache[key] = self._mesh_properties(path, scale)
+                properties = mesh_cache[key]
+            volume, center, tensor = (
+                properties[key] for key in ("volume", "center_mass", "inertia")
+            )
+        elif shape.tag == "box":
+            dimensions = vector(shape.get("size", "")) * self.scale
+            if np.any(dimensions <= 0):
+                raise ValueError("Box dimensions must be positive")
+            volume = float(np.prod(dimensions))
+            tensor = np.diag(volume * (np.sum(dimensions**2) - dimensions**2) / 12)
+        elif shape.tag in {"sphere", "cylinder"}:
+            radius = vector(shape.get("radius", ""), 1)[0] * self.scale
+            if radius <= 0:
+                raise ValueError("Radius must be positive")
+            if shape.tag == "sphere":
+                volume = 4 * np.pi * radius**3 / 3
+                tensor = np.eye(3) * (2 * volume * radius**2 / 5)
+            else:
+                length = vector(shape.get("length", ""), 1)[0] * self.scale
+                if length <= 0:
+                    raise ValueError("Cylinder length must be positive")
+                volume = np.pi * radius**2 * length
+                transverse = volume * (3 * radius**2 + length**2) / 12
+                tensor = np.diag([transverse, transverse, volume * radius**2 / 2])
+        else:
+            raise ValueError(f"Unsupported inertia geometry: {shape.tag}")
+        transform = origin_transform(element.find("origin"))
+        rotation = transform[:3, :3]
+        return {
+            "volume": volume,
+            "center_mass": rotation @ center + transform[:3, 3],
+            "inertia": rotation @ tensor @ rotation.T,
+        }
 
-        if not self.urdf_path.exists():
-            self.logger.error(f"URDF file not found: {self.urdf_path}")
-            return False
+    def update_inertia(self, *, only_invalid: bool = False) -> bool:
+        """Recompute all available link geometries, preserving mass and inertial axes.
 
-        # Parse URDF
+        Components share uniform density, apportioned by volume. Their tensors
+        are rotated into the link frame and combined about the compound COM.
+        Any failed link aborts the write; links without inertial data or geometry
+        are left unchanged. A successful write keeps a backup of the source.
+        With only_invalid, valid inertia definitions are left untouched and an
+        invalid definition without usable geometry fails instead of being skipped.
+        """
+        self.last_error = None
+        self.updated_links = []
         try:
             tree = ET.parse(self.urdf_path)
-            self.logger.info(f"Successfully parsed URDF file: {self.urdf_path}")
-        except ET.ParseError as e:
-            self.logger.error(f"Failed to parse URDF file: {e}")
-            return False
-
-        root = tree.getroot()
-
-        self.logger.info("Analyzing links and recalculating inertia matrices...")
-        self.logger.info(
-            "Note: Only modifying inertia matrices, keeping masses unchanged"
-        )
-
-        updated_count = 0
-        total_links = 0
-        skipped_links = []
-        failed_links = []
-
-        for link in root.findall(".//link"):
-            link_name = link.get("name", "unknown")
-            total_links += 1
-
-            # Skip certain links (optional)
-            skip_keywords = ["world", "base", "ground", "origin"]
-            if any(keyword in link_name.lower() for keyword in skip_keywords):
-                self.logger.debug(f"Skipping world/base link: {link_name}")
-                continue
-
-            self.logger.info(f"Processing link: {link_name}")
-
-            inertial = link.find("inertial")
-            if inertial is None:
-                self.logger.warning(
-                    f"Link {link_name} has no inertial element, skipping"
-                )
-                skipped_links.append(link_name)
-                continue
-
-            # Find corresponding mesh file and geometry origin
-            mesh_file, geom_origin = self.find_mesh_file_for_link(link)
-
-            if mesh_file and TRIMESH_AVAILABLE:
-                # Determine geometry type used
-                geom_type = self.geometry_preference
-                self.logger.info(f"Found mesh file: {mesh_file} (source: {geom_type})")
-
-                # Get current mass
-                mass_elem = inertial.find("mass")
-                current_mass = (
-                    float(mass_elem.get("value", 1.0)) if mass_elem is not None else 1.0
-                )
-                self.logger.info(f"Current mass: {current_mass:.6f} kg")
-
-                # Calculate inertia from mesh
-                properties = self.calculate_inertia_from_mesh(
-                    mesh_file, mass=current_mass, density=self.density, scale=self.scale
-                )
-
-                # If properties include a center of mass, update inertial/origin xyz
-                if (
-                    properties
-                    and "center_mass" in properties
-                    and properties["center_mass"] is not None
-                ):
-                    com = np.array(properties["center_mass"])
-                    # If geometry had an origin offset, the mesh COM is in mesh frame; adjust to link origin
-                    if geom_origin is not None:
-                        # The COM in link frame = geom_origin + com
-                        com_link = geom_origin + com
-                    else:
-                        com_link = com
-
-                    # Find or create inertial/origin element
-                    origin_elem = inertial.find("origin")
-                    if origin_elem is None:
-                        origin_elem = ET.SubElement(inertial, "origin")
-
-                    # Set xyz as the COM offset relative to link origin
-                    origin_elem.set(
-                        "xyz", f"{com_link[0]:.6e} {com_link[1]:.6e} {com_link[2]:.6e}"
-                    )
-                    self.logger.info(
-                        f"Set inertial origin xyz for {link_name} to {origin_elem.get('xyz')}"
-                    )
-
-                if properties:
-                    # Update inertia parameters
-                    inertia_elem = inertial.find("inertia")
-                    if inertia_elem is not None:
-                        urdf_params = self.inertia_matrix_to_urdf_params(
-                            properties["inertia"]
-                        )
-
-                        # Check if calculation result is valid
-                        valid, msg = self.is_valid_inertia_matrix(**urdf_params)
-
-                        if valid:
-                            # Show comparison between original and new values
-                            orig_ixx = float(inertia_elem.get("ixx", 0))
-                            orig_iyy = float(inertia_elem.get("iyy", 0))
-                            orig_izz = float(inertia_elem.get("izz", 0))
-
-                            self.logger.info(
-                                f"Original inertia: ixx={orig_ixx:.3e}, iyy={orig_iyy:.3e}, izz={orig_izz:.3e}"
-                            )
-                            self.logger.info(
-                                f"New inertia: ixx={urdf_params['ixx']:.3e}, iyy={urdf_params['iyy']:.3e}, izz={urdf_params['izz']:.3e}"
-                            )
-                            self.logger.info(f"Mass unchanged: {current_mass:.6f} kg")
-
-                            # Regularize inertia matrix to ensure positive definiteness
-                            I_reg, min_allowed = self.regularize_inertia_matrix(
-                                properties["inertia"],
-                                rel_tol=self.regularize_rel_tol,
-                                abs_tol=self.regularize_abs_tol,
-                                min_eig=self.enforce_min_eig,
-                            )
-                            # Convert regularized matrix to URDF params
-                            urdf_params_reg = self.inertia_matrix_to_urdf_params(I_reg)
-
-                            # Log eigenvalue information
-                            try:
-                                eigs = np.linalg.eigvalsh(I_reg)
-                                self.logger.info(
-                                    f"Post-regularize min eigenvalue: {eigs[0]:.6e}, threshold used: {min_allowed:.6e}"
-                                )
-                            except Exception:
-                                pass
-
-                            # Update URDF with regularized params
-                            for param, value in urdf_params_reg.items():
-                                inertia_elem.set(param, f"{value:.6e}")
-
-                            # Clean up incorrect attributes
-                            for attr in ["iyx", "izx", "izy"]:
-                                if attr in inertia_elem.attrib:
-                                    del inertia_elem.attrib[attr]
-
-                            updated_count += 1
-                            self.logger.info(
-                                f"Successfully updated inertia parameters for {link_name}"
-                            )
+            root = tree.getroot()
+            if root.tag != "robot":
+                raise ValueError("Expected a <robot> root element")
+            issues = declaration_issues(root)
+            if issues:
+                raise URDFValidationError(issues)
+            resolver = MeshPathResolver(
+                self.urdf_dir, self.urdf_dir, prefer_converted=False
+            )
+            # Keep only unit-density mass properties, not loaded triangle meshes.
+            # Scope the cache to this update so edits are observed on the next run.
+            mesh_cache = {}
+            updated = []
+            for link in root.findall("link"):
+                inertial = link.find("inertial")
+                geometries = self._geometries(link)
+                if inertial is None:
+                    continue
+                try:
+                    if only_invalid:
+                        try:
+                            validate_inertial(inertial)
+                        except (ValueError, np.linalg.LinAlgError):
+                            pass
                         else:
-                            self.logger.error(
-                                f"Invalid inertia calculation for {link_name}: {msg}"
+                            continue
+                        if not geometries:
+                            raise ValueError(
+                                "Cannot repair invalid inertia without geometry"
                             )
-                            failed_links.append(link_name)
-                    else:
-                        self.logger.warning(
-                            f"No inertia matrix element found for {link_name}"
+                    elif not geometries:
+                        continue
+                    mass_element = inertial.find("mass")
+                    if mass_element is None:
+                        raise ValueError("Missing mass element")
+                    mass = vector(mass_element.get("value", ""), 1)[0]
+                    if mass <= 0:
+                        raise ValueError("Mass must be positive")
+                    parts = [
+                        self._geometry_properties(element, resolver, mesh_cache)
+                        for element in geometries
+                    ]
+                    volume = sum(part["volume"] for part in parts)
+                    center = (
+                        sum(part["volume"] * part["center_mass"] for part in parts)
+                        / volume
+                    )
+                    tensor = np.zeros((3, 3))
+                    for part in parts:
+                        offset = part["center_mass"] - center
+                        tensor += part["inertia"] + part["volume"] * (
+                            np.dot(offset, offset) * np.eye(3)
+                            - np.outer(offset, offset)
                         )
-                        skipped_links.append(link_name)
-                else:
-                    self.logger.error(
-                        f"Failed to calculate inertia from mesh for {link_name}"
+                    tensor *= mass / volume
+                    origin = inertial.find("origin")
+                    rotation = origin_transform(origin)[:3, :3]
+                    tensor = rotation.T @ tensor @ rotation
+                    valid, message = self.is_valid_inertia_matrix(
+                        **self.inertia_matrix_to_urdf_params(tensor)
                     )
-                    failed_links.append(link_name)
-            else:
-                if not mesh_file:
-                    self.logger.warning(f"No mesh file found for {link_name}")
-                    skipped_links.append(link_name)
-                if not TRIMESH_AVAILABLE:
-                    self.logger.error(
-                        f"Trimesh not available, cannot process {link_name}"
+                    if not valid:
+                        raise ValueError(message)
+                    tensor, _ = self.regularize_inertia_matrix(
+                        tensor,
+                        rel_tol=self.regularize_rel_tol,
+                        abs_tol=self.regularize_abs_tol,
+                        min_eig=self.enforce_min_eig,
                     )
-                    failed_links.append(link_name)
-
-        # Save updated URDF
-        if updated_count > 0:
-            # Create backup
+                    validate_inertia_tensor(tensor)
+                    if origin is None:
+                        origin = ET.SubElement(inertial, "origin")
+                    origin.set("xyz", numbers(center))
+                    inertia = inertial.find("inertia")
+                    if inertia is None:
+                        inertia = ET.SubElement(inertial, "inertia")
+                    inertia.attrib.clear()
+                    inertia.attrib.update(
+                        {
+                            key: format(float(value), ".17g")
+                            for key, value in self.inertia_matrix_to_urdf_params(
+                                tensor
+                            ).items()
+                        }
+                    )
+                    updated.append(link.get("name", ""))
+                except Exception as exc:
+                    raise ValueError(f"Link {link.get('name')!r}: {exc}") from exc
+            if not updated:
+                self.logger.info("No inertia definitions require recalculation")
+                return True
             backup_path = self.urdf_path.with_suffix(".urdf.backup")
             if not backup_path.exists():
                 shutil.copy2(self.urdf_path, backup_path)
-                self.logger.info(f"Created backup: {backup_path}")
-
-            # Save updated file
+            with tempfile.NamedTemporaryFile(
+                dir=self.urdf_path.parent, suffix=".urdf", delete=False
+            ) as pending:
+                pending_path = Path(pending.name)
             try:
-                tree.write(self.urdf_path, encoding="utf-8", xml_declaration=True)
-                self.logger.info(f"\nProcessing Summary:")
-                self.logger.info(f"  Total links: {total_links}")
-                self.logger.info(f"  Updated links: {updated_count}")
-                self.logger.info(f"  Skipped links: {len(skipped_links)}")
-                self.logger.info(f"  Failed links: {len(failed_links)}")
-                self.logger.info(f"  Saved to: {self.urdf_path}")
+                tree.write(pending_path, encoding="utf-8", xml_declaration=True)
+                pending_path.replace(self.urdf_path)
+            finally:
+                pending_path.unlink(missing_ok=True)
+            self.updated_links = updated
+            self.logger.info(
+                "Updated inertia for %s links; source masses preserved", len(updated)
+            )
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.logger.error("Inertia recalculation failed: %s", exc)
+            return False
 
-                # Log details if there are skipped or failed links
-                if skipped_links:
-                    self.logger.debug(f"Skipped links: {', '.join(skipped_links)}")
-                if failed_links:
-                    self.logger.warning(f"Failed links: {', '.join(failed_links)}")
-
-                return True
-            except Exception as e:
-                self.logger.error(f"Failed to save URDF file: {e}")
-                return False
-        else:
-            self.logger.warning("No updates performed")
-            if skipped_links:
-                self.logger.info(
-                    f"Skipped {len(skipped_links)} links without mesh files"
-                )
-            return True  # No error even if no updates
-
-    def batch_process(self, urdf_list: list) -> Dict[str, bool]:
+    def batch_process(self, urdf_list: list) -> dict[str, bool]:
         """Batch process multiple URDF files
 
         Args:
@@ -584,7 +475,7 @@ class URDFInertiaCalculator:
         # Summary
         successful = sum(1 for result in results.values() if result)
         total = len(results)
-        self.logger.info(f"\nBatch Processing Summary:")
+        self.logger.info("\nBatch Processing Summary:")
         self.logger.info(f"  Successful: {successful}/{total}")
         self.logger.info(f"  Failed: {total - successful}/{total}")
 
@@ -600,6 +491,11 @@ def main() -> int:
     )
     parser.add_argument("urdf_file", help="URDF file to update in place.")
     parser.add_argument(
+        "--only-invalid",
+        action="store_true",
+        help="Repair only invalid inertia definitions, preserving valid link parameters.",
+    )
+    parser.add_argument(
         "--geometry",
         choices=["visual", "collision"],
         default="visual",
@@ -609,10 +505,13 @@ def main() -> int:
         "--density",
         type=float,
         default=None,
-        help="Optional material density in kg/m^3.",
+        help="Optional uniform density in kg/m^3; mass normalization cancels it and URDF masses are preserved.",
     )
     parser.add_argument(
-        "--scale", type=float, default=1.0, help="Uniform mesh scale factor."
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Uniform geometry-size factor; geometry and joint origins are not scaled.",
     )
     parser.add_argument("--regularize-rel-tol", type=float, default=1e-6)
     parser.add_argument("--regularize-abs-tol", type=float, default=1e-8)
@@ -636,7 +535,7 @@ def main() -> int:
             regularize_abs_tol=args.regularize_abs_tol,
             enforce_min_eig=args.enforce_min_eig,
         )
-        return 0 if calculator.update_inertia() else 1
+        return 0 if calculator.update_inertia(only_invalid=args.only_invalid) else 1
     except Exception as exc:
         logger.error(f"Inertia recalculation failed: {exc}", exc_info=True)
         return 1

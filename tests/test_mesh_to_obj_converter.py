@@ -2,7 +2,6 @@ import pytest
 
 from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
 
-
 ASCII_STL = """solid triangle
 facet normal 0 0 1
   outer loop
@@ -23,9 +22,7 @@ def test_stl_is_converted_to_obj(tmp_path):
 
     assert output == source.with_suffix(".obj")
     assert output.is_file()
-    assert "v 0.00000000 0.00000000 0.00000000" in output.read_text(
-        encoding="utf-8"
-    )
+    assert "v 0.00000000 0.00000000 0.00000000" in output.read_text(encoding="utf-8")
 
 
 def test_directory_scan_is_case_insensitive_and_recursive(tmp_path):
@@ -43,3 +40,33 @@ def test_unsupported_format_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported mesh format"):
         MeshToOBJConverter().convert_file(source)
+
+
+def test_scene_instances_keep_transforms():
+    import numpy as np
+    import trimesh
+
+    scene = trimesh.Scene()
+    box = trimesh.creation.box()
+    scene.add_geometry(box, geom_name="box", node_name="first")
+    transform = np.eye(4)
+    transform[:3, 3] = [3, 0, 0]
+    scene.graph.update(frame_to="second", geometry="box", matrix=transform)
+    mesh = MeshToOBJConverter._as_single_mesh(scene)
+    np.testing.assert_allclose(mesh.bounds, [[-0.5, -0.5, -0.5], [3.5, 0.5, 0.5]])
+    assert len(mesh.faces) == 2 * len(box.faces)
+
+
+def test_empty_mesh_is_rejected():
+    import trimesh
+
+    with pytest.raises(ValueError, match="no triangle geometry"):
+        MeshToOBJConverter._as_single_mesh(trimesh.Trimesh())
+
+
+def test_output_cannot_overwrite_source(tmp_path):
+    source = tmp_path / "triangle.stl"
+    source.write_text(ASCII_STL)
+    with pytest.raises(ValueError, match="differ from the source"):
+        MeshToOBJConverter(overwrite=True).convert_file(source, source)
+    assert source.read_text() == ASCII_STL

@@ -1,3 +1,5 @@
+import contextlib
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -35,6 +37,72 @@ class MJCFEditor:
                 old_file = mesh.attrib["file"]
                 mesh.attrib["file"] = new_path_func(old_file)
 
+    def normalize_mesh_names(self) -> None:
+        """Normalize asset names and their references together."""
+        meshes = self.root.findall(".//asset/mesh")
+        names = {mesh.get("name") for mesh in meshes}
+        renamed = {}
+        for mesh in meshes:
+            original = mesh.get("name")
+            if not original:
+                continue
+            name = Path(original).stem
+            if name != original and name not in names:
+                mesh.set("name", name)
+                names.add(name)
+                renamed[original] = name
+        for geom in self.root.findall(".//geom"):
+            if geom.get("mesh") in renamed:
+                geom.set("mesh", renamed[geom.get("mesh")])
+
+    def move_geom_scales_to_meshes(self) -> None:
+        """Move upstream geom scales onto mesh assets, cloning shared meshes as needed."""
+        import numpy as np
+
+        asset = self.root.find("asset")
+        if asset is None:
+            return
+        meshes = {mesh.get("name"): mesh for mesh in asset.findall("mesh")}
+        groups = {}
+        for geom in self.root.findall(".//geom[@mesh]"):
+            groups.setdefault(geom.get("mesh"), []).append(geom)
+        for name, geoms in groups.items():
+            mesh = meshes.get(name)
+            if mesh is None or not any("scale" in geom.attrib for geom in geoms):
+                continue
+            attributes = mesh.attrib.copy()
+            base_scale = np.array(
+                [float(value) for value in mesh.get("scale", "1 1 1").split()]
+            )
+            variants = {}
+            for geom in geoms:
+                scale = np.array(
+                    [
+                        float(value)
+                        for value in geom.attrib.pop("scale", "1 1 1").split()
+                    ]
+                )
+                if scale.shape != (3,) or base_scale.shape != (3,):
+                    raise ValueError(f"Expected three mesh scale components for {name}")
+                effective = tuple(base_scale * scale)
+                if effective not in variants:
+                    variant_name = name
+                    target = mesh
+                    if variants:
+                        index = len(variants)
+                        variant_name = f"{name}_scale_{index}"
+                        while variant_name in meshes:
+                            index += 1
+                            variant_name = f"{name}_scale_{index}"
+                        target = ET.SubElement(asset, "mesh", attributes.copy())
+                        target.set("name", variant_name)
+                        meshes[variant_name] = target
+                    target.set(
+                        "scale", " ".join(format(value, ".17g") for value in effective)
+                    )
+                    variants[effective] = variant_name
+                geom.set("mesh", variants[effective])
+
     def get_all_mesh_and_texture_files(self):
         """
         Recursively get the file paths of MJCF <asset><mesh> nodes and all <asset><texture> nodes.
@@ -54,11 +122,18 @@ class MJCFEditor:
         """Save the modified xml file, auto-indented (no extra newlines), default with _edit suffix."""
         if out_path is None:
             out_path = self.xml_path.with_name(self.xml_path.stem + "_edit.xml")
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        ET.indent(self.tree, space="  ")
+        with tempfile.NamedTemporaryFile(
+            dir=out_path.parent, suffix=".xml", delete=False
+        ) as temp:
+            temp_path = Path(temp.name)
         try:
-            ET.indent(self.tree, space="  ")  # Python 3.9+
-        except AttributeError:
-            pass  # No indent support in lower versions, just write raw format
-        self.tree.write(out_path, encoding="utf-8", xml_declaration=True)
+            self.tree.write(temp_path, encoding="utf-8", xml_declaration=True)
+            temp_path.replace(out_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def fix_base(self, root_body_name: str = "root") -> bool:
         """Fix the base by removing `<freejoint>` from the root body.
@@ -74,19 +149,25 @@ class MJCFEditor:
             return False
 
         # Prefer the explicit root body name; otherwise fall back to the first body.
-        root_body = worldbody.find(f"./body[@name='{root_body_name}']")
+        root_body = next(
+            (
+                body
+                for body in worldbody.findall("body")
+                if body.get("name") == root_body_name
+            ),
+            None,
+        )
         if root_body is None:
             root_body = worldbody.find("./body")
         if root_body is None:
             return False
 
         removed = False
-        for fj in list(root_body.findall("freejoint")):
-            try:
-                root_body.remove(fj)
-                removed = True
-            except Exception:
-                pass
+        for fj in root_body.findall("freejoint") + root_body.findall(
+            "joint[@type='free']"
+        ):
+            root_body.remove(fj)
+            removed = True
 
         return removed
 
@@ -100,18 +181,41 @@ class MJCFEditor:
         if worldbody is None:
             return False
 
-        root_body = worldbody.find(f"./body[@name='{root_body_name}']")
+        root_body = next(
+            (
+                body
+                for body in worldbody.findall("body")
+                if body.get("name") == root_body_name
+            ),
+            None,
+        )
         if root_body is None:
             root_body = worldbody.find("./body")
         if root_body is None:
             return False
 
-        if root_body.find("freejoint") is not None:
+        if (
+            root_body.find("freejoint") is not None
+            or root_body.find("joint[@type='free']") is not None
+        ):
             return False
+
+        if root_body.find("joint") is not None:
+            raise ValueError(
+                "Cannot add a freejoint to a root body with existing joints"
+            )
 
         fj = ET.Element("freejoint")
         root_body.insert(0, fj)
         return True
+
+    def _unused_name(self, tag: str, preferred: str) -> str:
+        occupied = {element.get("name") for element in self.root.iter(tag)}
+        name, index = preferred, 0
+        while name in occupied:
+            index += 1
+            name = f"{preferred}_{index}"
+        return name
 
     def add_default_ground_plane(self):
         """
@@ -146,11 +250,12 @@ class MJCFEditor:
                 )
                 asset_node.append(skybox)
             # groundplane texture
+            texture_name = self._unused_name("texture", "groundplane")
             tex = ET.Element(
                 "texture",
                 attrib={
                     "type": "2d",
-                    "name": "groundplane",
+                    "name": texture_name,
                     "builtin": "checker",
                     "mark": "edge",
                     "rgb1": "0.2 0.3 0.4",
@@ -166,7 +271,7 @@ class MJCFEditor:
                 "material",
                 attrib={
                     "name": "groundplane",
-                    "texture": "groundplane",
+                    "texture": texture_name,
                     "texuniform": "true",
                     "texrepeat": "5 5",
                     "reflectance": "0.2",
@@ -180,12 +285,17 @@ class MJCFEditor:
             worldbody = ET.Element("worldbody")
             self.root.append(worldbody)
 
-        # Add a floor only when missing.
-        if worldbody.find("geom[@name='floor']") is None:
+        # Reuse an existing floor, including one given a distinct name on an
+        # earlier call. A robot geom called floor must retain its own identity.
+        if not any(
+            geom.get("name") == "floor"
+            or (geom.get("type") == "plane" and geom.get("material") == "groundplane")
+            for geom in worldbody.findall("geom")
+        ):
             floor = ET.Element(
                 "geom",
                 attrib={
-                    "name": "floor",
+                    "name": self._unused_name("geom", "floor"),
                     "size": "0 0 0.05",
                     "type": "plane",
                     "material": "groundplane",
@@ -200,7 +310,9 @@ class MJCFEditor:
                 attrib={"pos": "0 0 1.5", "dir": "0 0 -1", "directional": "true"},
             )
             worldbody.append(light)
-        if worldbody.find("camera[@name='top_camera']") is None:
+        if not any(
+            camera.get("name") == "top_camera" for camera in self.root.iter("camera")
+        ):
             cam = ET.Element(
                 "camera",
                 attrib={"name": "top_camera", "pos": "0 0 5", "xyaxes": "1 0 0 0 1 0"},
@@ -295,7 +407,6 @@ class MJCFEditor:
                     break
             self.root.insert(insert_index, compiler)
         compiler.set("meshdir", meshdir)
-        compiler.set("balanceinertia", "true")
 
     def ensure_compiler_texturedir(self, texturedir: str = "meshes") -> None:
         """Ensure <compiler> has a `texturedir` so texture file paths can be relative to meshes/.
@@ -383,7 +494,16 @@ class MJCFEditor:
             for k, v in geom_attrib.items():
                 geom.set(k, v)
 
-        _ensure_simple_class("visual", {"material": "visualgeom", "group": "1"})
+        _ensure_simple_class(
+            "visual", {"contype": "0", "conaffinity": "0", "group": "1"}
+        )
+        asset = self.root.find("asset")
+        if asset is None:
+            asset = ET.SubElement(self.root, "asset")
+        if asset.find("material[@name='collision_material']") is None:
+            ET.SubElement(
+                asset, "material", name="collision_material", rgba="1.0 0.28 0.1 0.9"
+            )
         _ensure_simple_class(
             "collision", {"material": "collision_material", "group": "3"}
         )
@@ -446,6 +566,9 @@ class MJCFEditor:
                 continue
             if not mesh_file.startswith("visual/"):
                 continue
+            mat = materials_by_name.get(mesh_name)
+            if mat is not None and ("texture" in mat.attrib or "rgba" in mat.attrib):
+                continue
 
             obj_abs = meshes_dir / mesh_file
             if not obj_abs.exists():
@@ -471,7 +594,6 @@ class MJCFEditor:
                 existing_textures.add(tex_name)
                 added += 1
 
-            mat = materials_by_name.get(mesh_name)
             if mat is None:
                 mat = ET.Element("material")
                 mat.set("name", mesh_name)
@@ -619,15 +741,10 @@ class MJCFEditor:
         for mesh_name, obj_list in variant_map.items():
             for idx, obj_path in enumerate(obj_list):
                 # Variant name.
-                if idx == 0:
-                    tex_name = mesh_name
-                else:
-                    tex_name = f"{mesh_name}_{idx}"
-                # Drop the OBJ suffix before trying image extensions.
-                obj_path_no_ext = Path(obj_path).with_suffix("")
+                tex_name = mesh_name if idx == 0 else f"{mesh_name}_{idx}"
                 # Look for texture files in the same relative directory.
                 for ext in exts:
-                    tex_path = mesh_dir / obj_path_no_ext.with_suffix(ext)
+                    tex_path = mesh_dir / Path(obj_path).with_suffix(ext)
                     if tex_path.exists():
                         tex_elem = ET.Element("texture")
                         tex_elem.set("type", "2d")
@@ -637,6 +754,7 @@ class MJCFEditor:
                         asset_node.append(tex_elem)
                         break
 
+    @staticmethod
     def get_material_info_from_subxml(subxml_path, variant_name):
         """
         Parse a generated sub-XML file and return material/texture properties for a variant.
@@ -729,7 +847,7 @@ class MJCFEditor:
             if mat.attrib.get("name") == mat_name:
                 mat_elem = mat
                 break
-        if not mat_elem:
+        if mat_elem is None:
             return
         # Create a new material node and normalize shininess.
         new_mat = ET.Element("material")
@@ -764,6 +882,14 @@ class MJCFEditor:
         if asset_node is None:
             return
 
+        # Keep fallback attributes before replacing same-name materials.
+        material_props = {
+            mat.get("name"): mat.attrib.copy()
+            for mat in asset_node.findall("material")
+            if mat.get("name")
+        }
+        subxml_roots = {}
+
         # Remove only material and texture nodes related to this variant map.
         variant_names = set()
         for mesh_name, obj_list in variant_map.items():
@@ -786,22 +912,14 @@ class MJCFEditor:
                 if mesh_name and material_name:
                     mesh_to_material[mesh_name] = material_name
 
-        # Cache original material attributes.
-        material_props = {}
-        for mat in self.root.findall(".//asset/material"):
-            name = mat.attrib.get("name")
-            if name:
-                material_props[name] = mat.attrib.copy()
-
         # Create new material and texture nodes.
         for mesh_name, obj_list in variant_map.items():
             for idx, obj_path in enumerate(obj_list):
                 variant_name = f"{mesh_name}_{idx}" if idx > 0 else mesh_name
-                obj_path_no_ext = Path(obj_path).with_suffix("")
                 # Look for texture files.
                 tex_found = False
                 for ext in exts:
-                    tex_path = mesh_dir / obj_path_no_ext.with_suffix(ext)
+                    tex_path = mesh_dir / Path(obj_path).with_suffix(ext)
                     if tex_path.exists():
                         # Create texture node.
                         tex_elem = ET.Element("texture")
@@ -821,21 +939,28 @@ class MJCFEditor:
                         break
                 if not tex_found:
                     # Without a texture, fall back to material attributes from the sub-XML.
-                    # variant_dict = variant_map.get(variant_name, None)
-                    obj_path = Path(obj_list[0])
+                    obj_path = Path(obj_path)
                     subxml_path = mesh_dir / obj_path.parent / (mesh_name + ".xml")
 
                     if subxml_path.exists():
 
-                        try:
-                            tree = ET.parse(subxml_path)
-                            root = tree.getroot()
-                        except Exception:
-                            root = None
+                        if subxml_path not in subxml_roots:
+                            try:
+                                subxml_roots[subxml_path] = ET.parse(
+                                    subxml_path
+                                ).getroot()
+                            except (OSError, ET.ParseError):
+                                subxml_roots[subxml_path] = None
+                        root = subxml_roots[subxml_path]
                         if root is not None:
+                            source_mesh_name = obj_path.stem
+                            for mesh in root.findall("asset/mesh"):
+                                if Path(mesh.get("file", "")).name == obj_path.name:
+                                    source_mesh_name = mesh.get("name", obj_path.stem)
+                                    break
                             mat_name = None
                             for geom in root.findall(".//geom"):
-                                if geom.attrib.get("mesh") == variant_name:
+                                if geom.attrib.get("mesh") == source_mesh_name:
                                     mat_name = geom.attrib.get("material")
                                     break
                             if mat_name:
@@ -907,6 +1032,15 @@ class MJCFEditor:
                                             asset_node.append(mat_elem)
                                         break
 
+                if not any(
+                    material.get("name") == variant_name
+                    for material in asset_node.findall("material")
+                ):
+                    original_name = mesh_to_material.get(mesh_name)
+                    attributes = material_props.get(original_name, {}).copy()
+                    attributes["name"] = variant_name
+                    ET.SubElement(asset_node, "material", attributes)
+
     def ensure_visual_prefix_for_all_textures(self):
         """
         Ensure all <texture> file attributes are normalized and start with 'visual/' (lowercase).
@@ -937,6 +1071,9 @@ class MJCFEditor:
             file_path = tex.attrib.get("file")
             if not file_path:
                 continue
+            if Path(file_path.replace("\\", "/")).is_absolute():
+                # The pipeline bundles exact external files after postprocessing.
+                continue
             file_path = _norm(file_path)
             # After `remove_meshes_prefix`, the expected form is `visual/...`.
             if file_path.startswith("meshes/"):
@@ -951,7 +1088,6 @@ class MJCFEditor:
         Only supports mesh files as relative paths, and texture files must be in the same directory as the mesh file.
         Automatically adds 'visual/' prefix to the texture file path if not present.
         """
-        import os
 
         mesh_nodes = self.root.findall(".//asset/mesh")
         asset_node = self.root.find(".//asset")
@@ -1019,15 +1155,9 @@ class MJCFEditor:
                     file_map[f.name] = rel_path
                     file_map[f.stem] = rel_path
 
-        # Normalize geom mesh references to mesh names without file extensions.
-        for geom in self.root.findall(".//geom"):
-            mesh_attr = geom.get("mesh")
-            if mesh_attr:
-                mesh_name = Path(mesh_attr).stem
-                if mesh_attr != mesh_name:
-                    geom.set("mesh", mesh_name)
-
         for mesh in self.root.findall(".//asset/mesh"):
+            if Path(mesh.get("file", "").replace("\\", "/")).is_absolute():
+                continue
             mesh_name = mesh.attrib.get("name")
             if mesh_name and mesh_name in file_map:
                 mesh.attrib["file"] = prefix + file_map[mesh_name]
@@ -1038,10 +1168,9 @@ class MJCFEditor:
 
         for tex in self.root.findall(".//asset/texture"):
             fname = tex.attrib.get("file")
-            if fname:
-                fname_only = Path(fname.replace("\\", "/")).name
-            else:
-                fname_only = ""
+            if fname and Path(fname.replace("\\", "/")).is_absolute():
+                continue
+            fname_only = Path(fname.replace("\\", "/")).name if fname else ""
             if fname_only and fname_only in file_map:
                 tex.attrib["file"] = prefix + file_map[fname_only]
             elif fname:
@@ -1071,7 +1200,6 @@ class MJCFEditor:
         For each mesh, automatically add <texture> and <material> nodes. The texture name is the same as the mesh name, and the texture path is the image with the same name in the same directory as the mesh.
         If there are multiple textures, they are automatically numbered.
         """
-        import os
 
         mesh_dir = Path(mesh_dir)
         asset_node = self.root.find(".//asset")
@@ -1139,75 +1267,51 @@ class MJCFEditor:
                     dest = target / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(f), str(dest))
-                try:
+                with contextlib.suppress(Exception):
                     sub.rmdir()
-                except Exception:
-                    pass
             else:
                 shutil.move(str(sub), str(target))
         # Delete empty Collision directory
-        try:
+        with contextlib.suppress(Exception):
             collision_dir.rmdir()
-        except Exception:
-            pass
 
     def auto_add_mesh_variants(self, variant_map, prefix="Visual/"):
         """
-        Clear existing <mesh> nodes and add globally unique mesh assets.
+        Update visual mesh variants while preserving scales and unrelated assets.
         variant_map: {mesh_name: [list of obj paths]}
         prefix: path prefix (such as 'Visual/')
         """
         asset_node = self.root.find(".//asset")
         if asset_node is None:
             return
-        # Clear existing mesh nodes.
-        for mesh in list(asset_node.findall("mesh")):
-            asset_node.remove(mesh)
-
-        # Deduplicate by file path globally.
-        added_files = set()
-        mesh_items = []
+        existing = {mesh.get("name"): mesh for mesh in asset_node.findall("mesh")}
+        planned_names = {}
         for mesh_name, obj_list in variant_map.items():
-            # Deduplicate while preserving order.
-            seen = set()
-            unique_obj_list = []
-            for obj_path in obj_list:
-                if obj_path not in seen:
-                    seen.add(obj_path)
-                    unique_obj_list.append(obj_path)
-            # Sort by numeric filename suffix so variant indices follow file suffixes.
-            try:
-                import re
-
-                def _sort_key(p):
-                    stem = Path(p).stem
-                    m = re.search(r"_(\d+)$", stem)
-                    if m:
-                        return (0, int(m.group(1)), stem)
-                    m2 = re.search(r"(\d+)$", stem)
-                    if m2:
-                        return (0, int(m2.group(1)), stem)
-                    return (1, stem)
-
-                unique_obj_list.sort(key=_sort_key)
-            except Exception:
-                pass
-            for idx, obj_path in enumerate(unique_obj_list):
-                file_path = prefix + obj_path
-                mesh_items.append((mesh_name, idx, file_path))
-        for mesh_name, idx, file_path in mesh_items:
-            if file_path in added_files:
-                continue
-            added_files.add(file_path)
-            if idx == 0:
-                mjcf_mesh_name = mesh_name
-            else:
-                mjcf_mesh_name = f"{mesh_name}_{idx}"
-            mesh_elem = ET.Element("mesh")
-            mesh_elem.set("name", mjcf_mesh_name)
-            mesh_elem.set("file", file_path)
-            mesh_elem.set("content_type", "model/obj")
-            asset_node.append(mesh_elem)
+            for idx, obj_path in enumerate(dict.fromkeys(obj_list)):
+                name = mesh_name if idx == 0 else f"{mesh_name}_{idx}"
+                if name in planned_names:
+                    raise ValueError(f"Conflicting variant mesh name: {name}")
+                planned_names[name] = obj_path
+                if (
+                    idx > 0
+                    and name in existing
+                    and existing[name].get("file") != prefix + obj_path
+                ):
+                    raise ValueError(
+                        f"Variant mesh name conflicts with an existing asset: {name}"
+                    )
+        for mesh_name, obj_list in variant_map.items():
+            template = existing.get(mesh_name)
+            attributes = template.attrib.copy() if template is not None else {}
+            for idx, obj_path in enumerate(dict.fromkeys(obj_list)):
+                variant_name = mesh_name if idx == 0 else f"{mesh_name}_{idx}"
+                mesh = existing.get(variant_name)
+                if mesh is None:
+                    mesh = ET.SubElement(asset_node, "mesh", attributes.copy())
+                    existing[variant_name] = mesh
+                mesh.set("name", variant_name)
+                mesh.set("file", prefix + obj_path)
+                mesh.set("content_type", "model/obj")
 
     def deduplicate_mesh_names(self):
         """
@@ -1232,9 +1336,8 @@ class MJCFEditor:
         - If found, update the file attribute; if not, print a warning.
         search_dirs: list of Path or str, directories to search for textures. If None, use xml file's parent.
         """
-        import os
-        from pathlib import Path
         import difflib
+        from pathlib import Path
 
         if search_dirs is None:
             search_dirs = [self.xml_path.parent]
@@ -1282,207 +1385,107 @@ class MJCFEditor:
             if not found:
                 self.logger.warning(f"Texture file not found: {tex_file}")
 
-    def add_variant_geoms_and_materials(self, variant_map):
+    def preserve_material_bindings(self, material_names, variant_map) -> set[str]:
+        """Reserve explicit materials before generating same-name mesh materials.
+
+        Keep existing names when possible. If a material shares a planned mesh
+        material name, rename that material and every reference together.
         """
-        For each entry in variant_map, ensure that under the corresponding
-        `<body name="<mesh_name>">` in `./worldbody` there are `<geom>` nodes
-        for each variant (class="visualgeom", mesh="<variant_name>") and that
-        each such geom references a material named exactly as the variant.
+        asset = self.root.find("asset")
+        if asset is None:
+            return set()
+        materials = {
+            material.get("name"): material for material in asset.findall("material")
+        }
+        protected = set(material_names) & materials.keys()
+        variants = {
+            name if index == 0 else f"{name}_{index}"
+            for name, paths in variant_map.items()
+            for index in range(len(paths))
+        }
+        occupied = materials.keys() | variants
+        renamed = {}
+        for name in sorted(protected & variants):
+            base = f"{name}_urdf"
+            candidate, index = base, 0
+            while candidate in occupied:
+                index += 1
+                candidate = f"{base}_{index}"
+            materials[name].set("name", candidate)
+            occupied.add(candidate)
+            renamed[name] = candidate
+        for element in self.root.iter():
+            if element.get("material") in renamed:
+                element.set("material", renamed[element.get("material")])
+        return (protected - renamed.keys()) | set(renamed.values())
 
-        If the material does not exist in `<asset>`, create it. Preference
-        order for material creation: existing texture (same-name texture node),
-        else attempt to find texture file under mesh_dir, else create rgba-only
-        material using a default appearance.
+    def add_variant_geoms_and_materials(self, variant_map, *, protected_materials=None):
+        """Expand material parts for every visual instance, preserving its transform.
 
-        variant_map: dict of {mesh_name: [list of obj paths]}
+        Stable, unique geom names make expansion idempotent across save/reload.
+        Geoms sharing a mesh are independent instances, including coincident ones.
         """
-        asset_node = self.root.find(".//asset")
-        if asset_node is None:
-            self.logger.warning(
-                "No <asset> node found, skipping add_variant_geoms_and_materials"
-            )
+        asset = self.root.find("asset")
+        worldbody = self.root.find("worldbody")
+        if asset is None or worldbody is None:
             return
-
-        # collect existing material names for quick checks
-        existing_mats = {m.attrib.get("name") for m in asset_node.findall("material")}
-
-        worldbody = self.root.find(".//worldbody")
-        if worldbody is None:
-            self.logger.warning(
-                "No <worldbody> node found, skipping add_variant_geoms_and_materials"
-            )
-            return
-
-        self.logger.info(
-            f"add_variant_geoms_and_materials: processing {len(variant_map)} variants"
-        )
-
-        visual_class_name = "visualgeom"
+        materials = {node.get("name") for node in asset.findall("material")}
+        protected_materials = set(protected_materials or ())
+        meshes = {node.get("name") for node in asset.findall("mesh")}
+        named_geoms = {
+            geom.get("name"): geom
+            for geom in worldbody.iter("geom")
+            if geom.get("name")
+        }
         collision_classes = {"collision", "collisiongeom"}
-
-        # For each body (preserve nesting order), if its name is in variant_map,
-        # ensure visual geoms exist and remove inline rgba on geoms (use materials instead).
-        for body in worldbody.findall(".//body"):
-            body_name = body.attrib.get("name")
-
-            if not body_name:
-                continue
-            geoms_list = body.findall("geom")
-            if not geoms_list:
-                continue
-
-            # Prefer a visual mesh in this body; many models place collision geom first.
-            mesh_name = None
-            for g in geoms_list:
-                g_mesh = g.attrib.get("mesh")
-                if not g_mesh:
+        for body in [worldbody, *worldbody.iter("body")]:
+            for source in list(body.findall("geom")):
+                mesh_name = source.get("mesh")
+                variants = variant_map.get(mesh_name, [])
+                if not variants or source.get("class") in collision_classes:
                     continue
-                g_class = g.attrib.get("class")
-                if g_class in {"visual", "visualgeom"} and g_mesh in variant_map:
-                    mesh_name = g_mesh
-                    break
-
-            # Fallback: pick any non-collision mesh that exists in variant_map.
-            if mesh_name is None:
-                for g in geoms_list:
-                    g_mesh = g.attrib.get("mesh")
-                    if not g_mesh:
-                        continue
-                    g_class = g.attrib.get("class")
-                    if g_class in collision_classes:
-                        continue
-                    if g_mesh in variant_map:
-                        mesh_name = g_mesh
-                        break
-
-            if mesh_name not in variant_map:
-                continue
-
-            obj_list = variant_map.get(mesh_name, [])
-            for idx, obj_path in enumerate(obj_list):
-                variant_name = f"{mesh_name}_{idx}" if idx > 0 else mesh_name
-
-                # check whether any geom already references this mesh
-                geom_exists = False
-                same_mesh_geoms = [
-                    g
-                    for g in body.findall("geom")
-                    if g.attrib.get("mesh") == variant_name
+                variant_names = [
+                    mesh_name if index == 0 else f"{mesh_name}_{index}"
+                    for index in range(len(variants))
                 ]
-                chosen = None
-                # prefer an already visual geom
-                for g in same_mesh_geoms:
-                    if g.attrib.get("class") in {visual_class_name, "visual"}:
-                        chosen = g
-                        break
-                # otherwise prefer any non-collision geom to upgrade
-                if chosen is None:
-                    for g in same_mesh_geoms:
-                        if g.attrib.get("class") not in collision_classes:
-                            chosen = g
-                            break
-                if chosen is not None:
-                    # ensure it is visual and references the correct material
-                    if chosen.attrib.get("class") not in {visual_class_name, "visual"}:
-                        chosen.set("class", visual_class_name)
-                    if chosen.attrib.get("material") != variant_name:
-                        chosen.set("material", variant_name)
-                        self.logger.debug(
-                            f"Set material='{variant_name}' on existing geom(mesh={variant_name}) in body {mesh_name}"
-                        )
-                    # remove inline rgba from chosen geom to avoid conflicting appearance
-                    if "rgba" in chosen.attrib:
-                        del chosen.attrib["rgba"]
-                        self.logger.debug(
-                            f"Removed inline rgba from geom(mesh={variant_name}) in body {mesh_name}"
-                        )
-                    # remove other non-collision duplicates that reference same mesh
-                    for g in list(same_mesh_geoms):
-                        if g is chosen:
-                            continue
-                        if g.attrib.get("class") not in collision_classes:
-                            try:
-                                body.remove(g)
-                                self.logger.debug(
-                                    f"Removed duplicate geom(mesh={variant_name}) in body {mesh_name}"
-                                )
-                            except Exception:
-                                pass
-                    geom_exists = True
-
-                # create material if missing (commented out previously) — log status
-                if variant_name not in existing_mats:
-                    self.logger.debug(f"Material '{variant_name}' not found in <asset>")
-
-                if geom_exists:
+                missing = set(variant_names) - meshes
+                if missing:
+                    raise ValueError(f"Missing variant mesh assets: {sorted(missing)}")
+                if source.get("class") not in {"visual", "visualgeom"}:
+                    source.set("class", "visualgeom")
+                keep_material = source.get("material") in protected_materials
+                if mesh_name in materials and not keep_material:
+                    source.set("material", mesh_name)
+                if len(variants) == 1:
                     continue
-
-                if len(obj_list) > 1:
-                    # Prefer upgrading an existing non-collision geom that already references this mesh
-                    upgraded = False
-                    for g in body.findall("geom"):
-                        if g.attrib.get("mesh") == variant_name:
-                            # If it's not a collision geom, upgrade to visual and set material
-                            if g.attrib.get("class") not in collision_classes:
-                                g.set("material", variant_name)
-                                if "rgba" in g.attrib:
-                                    del g.attrib["rgba"]
-                                upgraded = True
-                                self.logger.debug(
-                                    f"Upgraded existing geom(mesh={variant_name}) to visual/material in body {mesh_name}"
-                                )
-                                break
-                    if upgraded:
-                        continue
-                    # otherwise create visual geom and insert before first collision geom to preserve ordering
-                    new_geom = ET.Element("geom")
-                    new_geom.set("type", "mesh")
-                    new_geom.set("class", visual_class_name)
-                    new_geom.set("material", variant_name)
-                    new_geom.set("mesh", variant_name)
-                else:
-                    # single variant: try to reuse or upgrade an existing geom instead of adding duplicates
-                    updated = False
-                    for g in body.findall("geom"):
-                        if g.attrib.get("mesh") == variant_name:
-                            # prefer not to convert collision geoms to visual; only upgrade non-collision geoms
-                            if g.attrib.get("class") not in collision_classes:
-                                g.set("class", visual_class_name)
-                                g.set("material", variant_name)
-                                if "rgba" in g.attrib:
-                                    del g.attrib["rgba"]
-                                updated = True
-                                self.logger.debug(
-                                    f"Updated existing geom(mesh={variant_name}) to visual/material in body {mesh_name}"
-                                )
-                                break
-                    if updated:
-                        continue
-                    # if no suitable existing geom found, insert a visual geom.
-                    # NOTE: for type="mesh", MuJoCo requires a valid `mesh` attribute.
-                    new_geom = ET.Element("geom")
-                    new_geom.set("type", "mesh")
-                    new_geom.set("class", visual_class_name)
-                    new_geom.set("material", variant_name)
-                    new_geom.set("mesh", variant_name)
-
-                inserted = False
-                for i, child in enumerate(list(body)):
-                    if (
-                        child.tag == "geom"
-                        and child.attrib.get("class") in collision_classes
-                    ):
-                        body.insert(i, new_geom)
-                        inserted = True
-                        self.logger.debug(
-                            f"Inserted visual geom(mesh={variant_name}) before collision geom in body {mesh_name}"
-                        )
-                        break
-                if not inserted:
-                    body.append(new_geom)
-                    self.logger.debug(
-                        f"Appended visual geom(mesh={variant_name}) to body {mesh_name}"
-                    )
+                if not source.get("name"):
+                    index = 1
+                    while f"{mesh_name}_visual_{index}" in named_geoms:
+                        index += 1
+                    source.set("name", f"{mesh_name}_visual_{index}")
+                    named_geoms[source.get("name")] = source
+                insert_at = list(body).index(source) + 1
+                for index, variant_name in enumerate(variant_names[1:], start=1):
+                    attributes = source.attrib.copy()
+                    attributes.update(type="mesh", mesh=variant_name)
+                    if variant_name in materials and not keep_material:
+                        attributes["material"] = variant_name
+                    base_name = f"{source.get('name')}__variant_{index}"
+                    name = base_name
+                    suffix = 1
+                    while name in named_geoms:
+                        attributes["name"] = name
+                        existing = named_geoms[name]
+                        if existing in list(body) and existing.attrib == attributes:
+                            break
+                        name = f"{base_name}_{suffix}"
+                        suffix += 1
+                    else:
+                        attributes["name"] = name
+                        geom = ET.Element("geom", attributes)
+                        body.insert(insert_at, geom)
+                        named_geoms[name] = geom
+                        insert_at += 1
 
     def remove_missing_textures(self, search_dirs=None):
         """
@@ -1502,7 +1505,7 @@ class MJCFEditor:
         for tex in textures:
             tex_file = tex.attrib.get("file")
             if not tex_file:
-                asset_node.remove(tex)
+                # Built-in skyboxes and checker textures do not have files.
                 continue
             tex_file = tex_file.replace("\\", "/")
             # normalize common casing variants

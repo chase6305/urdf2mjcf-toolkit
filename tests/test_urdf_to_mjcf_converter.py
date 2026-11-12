@@ -3,12 +3,47 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import urdf2mjcf.urdf_to_mjcf_converter as converter_module
+from urdf2mjcf.physics import rename_reserved_body_names
 from urdf2mjcf.urdf_to_mjcf_converter import URDF2MJCFConverter
+
+
+def test_world_alias_updates_body_references_without_renaming_joints_or_geoms():
+    root = ET.fromstring(
+        '<mujoco><worldbody><body name="world" pos="1 2 3"><joint name="world"/>'
+        '<geom name="world"/><body name="world_urdf"/></body>'
+        '<camera target="world"/><light target="world"/></worldbody>'
+        '<contact><exclude body1="world" body2="world_urdf"/></contact>'
+        '<sensor><subtreecom body="world"/><framepos objtype="body" objname="world"/>'
+        '<framequat objtype="xbody" objname="world" reftype="body" refname="world"/>'
+        '<framepos objtype="geom" objname="world"/></sensor>'
+        '<actuator><motor joint="world"/></actuator></mujoco>'
+    )
+    aliases = rename_reserved_body_names(root)
+    assert aliases == {"world": "world_urdf_1"}
+    body = root.find("worldbody/body")
+    assert body.attrib == {"name": "world_urdf_1", "pos": "1 2 3"}
+    assert body.find("joint").get("name") == "world"
+    assert body.find("geom").get("name") == "world"
+    assert root.find("actuator/motor").get("joint") == "world"
+    assert root.find("contact/exclude").attrib == {
+        "body1": "world_urdf_1",
+        "body2": "world_urdf",
+    }
+    assert root.find("sensor/subtreecom").get("body") == "world_urdf_1"
+    assert root.find("sensor/framepos").get("objname") == "world_urdf_1"
+    quaternion = root.find("sensor/framequat")
+    assert quaternion.get("objname") == quaternion.get("refname") == "world_urdf_1"
+    assert root.findall("sensor/framepos")[1].get("objname") == "world"
+    assert root.find("worldbody/camera").get("target") == "world_urdf_1"
+    assert root.find("worldbody/light").get("target") == "world_urdf_1"
+    assert rename_reserved_body_names(root) == {}
 
 
 def _converter(tmp_path):
     source = tmp_path / "robot.urdf"
-    source.write_text('<robot name="test" />', encoding="utf-8")
+    source.write_text(
+        '<robot name="test"><link name="base"/></robot>', encoding="utf-8"
+    )
     return URDF2MJCFConverter(source, tmp_path / "output", tmp_path / "assets")
 
 
@@ -31,13 +66,13 @@ def test_fresh_output_is_accepted(tmp_path, monkeypatch):
     converter = _converter(tmp_path)
 
     def fake_run(*args, **kwargs):
-        converter.output_xml.write_text("fresh", encoding="utf-8")
+        converter.output_xml.write_text('<mujoco model="fresh" />', encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(converter_module.subprocess, "run", fake_run)
 
     assert converter.convert()
-    assert converter.get_output_xml().read_text(encoding="utf-8") == "fresh"
+    assert ET.parse(converter.get_output_xml()).getroot().get("model") == "fresh"
 
 
 def test_staged_urdf_prefers_converted_obj(tmp_path, monkeypatch):
@@ -57,9 +92,50 @@ def test_staged_urdf_prefers_converted_obj(tmp_path, monkeypatch):
         staged_urdf = Path(command[1])
         mesh = ET.parse(staged_urdf).getroot().find(".//mesh")
         assert mesh.get("filename").endswith("/visual/arm.obj")
-        converter.output_xml.write_text("fresh", encoding="utf-8")
+        converter.output_xml.write_text(
+            '<mujoco model="fresh"><worldbody><body name="arm">'
+            '<geom type="mesh" mesh="arm.obj" class="visual"/>'
+            "</body></worldbody></mujoco>",
+            encoding="utf-8",
+        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(converter_module.subprocess, "run", fake_run)
 
     assert converter.convert()
+
+
+def test_subprocess_paths_are_absolute_and_staging_is_cleaned(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    original = '<robot name="test"><link name="base"/></robot>'
+    Path("robot.urdf").write_text(original)
+    converter = URDF2MJCFConverter(
+        Path("robot.urdf"), Path("output"), Path("output/assets")
+    )
+    staged = []
+
+    def fake_run(command, **kwargs):
+        assert Path(command[1]).is_absolute()
+        assert Path(command[-1]).is_absolute()
+        assert Path(kwargs["cwd"]).is_absolute()
+        staged.append(Path(command[1]))
+        converter.output_xml.write_text('<mujoco model="fresh" />')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(converter_module.subprocess, "run", fake_run)
+    assert converter.convert()
+    assert not staged[0].exists()
+    assert Path("robot.urdf").read_text() == original
+
+
+def test_missing_mesh_fails_before_external_command(tmp_path, monkeypatch):
+    converter = _converter(tmp_path)
+    converter.urdf_path.write_text(
+        '<robot><link name="base"><visual><geometry><mesh filename="missing.obj" /></geometry></visual></link></robot>'
+    )
+    calls = []
+    monkeypatch.setattr(
+        converter_module.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    assert not converter.convert()
+    assert calls == []

@@ -1,0 +1,227 @@
+{
+  "date_utc": "2026-11-12",
+  "environment": {
+    "python": "3.12.14",
+    "mujoco": "3.8.0",
+    "numpy": "2.5.4",
+    "trimesh": "5.2.0",
+    "urdf2mjcf": "0.2.39",
+    "obj2mjcf": "0.0.25",
+    "cpu_affinity": [
+      31
+    ]
+  },
+  "source_access": "Read-only. Original inputs remained in place; original output directories were hidden before loading relocated copies.",
+  "verification": [
+    "Every explicit source mass, COM, and rotated full inertia tensor",
+    "Joint axes, ranges, damping, and friction",
+    "Relocated mesh and physical arrays, asset SHA-256, and unchanged source URDF/mesh hashes"
+  ],
+  "source_metadata": {
+    "UniversalRobotsUR5e/robot.urdf": {
+      "explicit_mass_sum_kg": 21.7,
+      "urdf_sha256": "e9b3bf00c62e9f081eecbfe69f8719e612233798772461bf293118e5d2632e45",
+      "urdf_modified_at_utc": "2026-11-03T13:28:55.170734+00:00"
+    },
+    "UnitreeGo2/robot.urdf": {
+      "explicit_mass_sum_kg": 16.087,
+      "urdf_sha256": "d0236929824296140051e7ff84b8055df8372af89e46d5db50623202b1fb5bb8",
+      "urdf_modified_at_utc": "2026-11-03T12:36:23.855816+00:00"
+    },
+    "BoosterT1/robot.urdf": {
+      "explicit_mass_sum_kg": 31.738357,
+      "urdf_sha256": "1a1d24932d649b72a6c741003de6ecc2941d7b4d78c471c62021e88bb9b37fe8",
+      "urdf_modified_at_utc": "2026-11-03T12:33:24.501445+00:00"
+    }
+  },
+  "results": [
+    {
+      "model": "UniversalRobotsUR5e/robot.urdf",
+      "backend": "mujoco",
+      "status": "passed",
+      "used_backend": "mujoco",
+      "source_MiB": 3.23,
+      "seconds": 0.908,
+      "statistics": {
+        "bodies": 12,
+        "joints": 6,
+        "position_coordinates": 6,
+        "degrees_of_freedom": 6,
+        "actuators": 0,
+        "geometries": 15,
+        "meshes": 14,
+        "textures": 2,
+        "sensors": 0,
+        "total_mass": 21.7
+      },
+      "checked_explicit_inertias": 7,
+      "max_tensor_absolute_error": 5.551115123125783e-17,
+      "worker_peak_RSS_MiB": 324.4,
+      "child_peak_RSS_MiB": 37.0,
+      "relocation_verified": true,
+      "source_hashes_unchanged": true
+    },
+    {
+      "model": "UnitreeGo2/robot.urdf",
+      "backend": "mujoco",
+      "status": "passed",
+      "used_backend": "mujoco",
+      "source_MiB": 4.23,
+      "seconds": 1.328,
+      "statistics": {
+        "bodies": 42,
+        "joints": 12,
+        "position_coordinates": 12,
+        "degrees_of_freedom": 12,
+        "actuators": 0,
+        "geometries": 45,
+        "meshes": 7,
+        "textures": 2,
+        "sensors": 0,
+        "total_mass": 16.276406621084927
+      },
+      "checked_explicit_inertias": 33,
+      "max_tensor_absolute_error": 1.249000902703301e-16,
+      "worker_peak_RSS_MiB": 451.9,
+      "child_peak_RSS_MiB": 37.0,
+      "relocation_verified": true,
+      "source_hashes_unchanged": true
+    },
+    {
+      "model": "BoosterT1/robot.urdf",
+      "backend": "mujoco",
+      "status": "passed",
+      "used_backend": "mujoco",
+      "source_MiB": 3.59,
+      "seconds": 1.259,
+      "statistics": {
+        "bodies": 25,
+        "joints": 23,
+        "position_coordinates": 23,
+        "degrees_of_freedom": 23,
+        "actuators": 0,
+        "geometries": 46,
+        "meshes": 25,
+        "textures": 2,
+        "sensors": 0,
+        "total_mass": 31.738356999999997
+      },
+      "checked_explicit_inertias": 24,
+      "max_tensor_absolute_error": 1.8010842722294453e-16,
+      "worker_peak_RSS_MiB": 595.7,
+      "child_peak_RSS_MiB": 37.0,
+      "relocation_verified": true,
+      "source_hashes_unchanged": true
+    },
+    {
+      "model": "UnitreeGo2/robot.urdf",
+      "backend": "urdf2mjcf",
+      "status": "passed",
+      "used_backend": "urdf2mjcf",
+      "source_MiB": 4.23,
+      "seconds": 4.952,
+      "statistics": {
+        "bodies": 42,
+        "joints": 12,
+        "position_coordinates": 12,
+        "degrees_of_freedom": 12,
+        "actuators": 12,
+        "geometries": 61,
+        "meshes": 16,
+        "textures": 2,
+        "sensors": 5,
+        "total_mass": 16.276406621084927
+      },
+      "checked_explicit_inertias": 33,
+      "max_tensor_absolute_error": 1.249000902703301e-16,
+      "worker_peak_RSS_MiB": 643.7,
+      "child_peak_RSS_MiB": 185.9,
+      "relocation_verified": true,
+      "source_hashes_unchanged": true
+    },
+    {
+      "model": "BoosterT1/robot.urdf",
+      "backend": "urdf2mjcf",
+      "status": "passed",
+      "used_backend": "urdf2mjcf",
+      "source_MiB": 3.59,
+      "seconds": 10.934,
+      "statistics": {
+        "bodies": 25,
+        "joints": 23,
+        "position_coordinates": 23,
+        "degrees_of_freedom": 23,
+        "actuators": 23,
+        "geometries": 46,
+        "meshes": 25,
+        "textures": 2,
+        "sensors": 5,
+        "total_mass": 31.738356999999997
+      },
+      "checked_explicit_inertias": 24,
+      "max_tensor_absolute_error": 1.8010842722294453e-16,
+      "worker_peak_RSS_MiB": 592.9,
+      "child_peak_RSS_MiB": 161.8,
+      "relocation_verified": true,
+      "source_hashes_unchanged": true
+    },
+    {
+      "model": "UniversalRobotsUR5e/robot.urdf",
+      "backend": "urdf2mjcf",
+      "status": "passed",
+      "used_backend": "urdf2mjcf",
+      "body_aliases": {
+        "world": "world_urdf"
+      },
+      "source_MiB": 3.23,
+      "seconds": 4.217,
+      "statistics": {
+        "bodies": 13,
+        "joints": 6,
+        "position_coordinates": 6,
+        "degrees_of_freedom": 6,
+        "actuators": 6,
+        "geometries": 35,
+        "meshes": 34,
+        "textures": 2,
+        "sensors": 5,
+        "total_mass": 21.7
+      },
+      "checked_explicit_inertias": 7,
+      "max_tensor_absolute_error": 5.551115123125783e-17,
+      "worker_peak_RSS_MiB": 490.5,
+      "child_peak_RSS_MiB": 161.6,
+      "relocation_verified": true,
+      "source_hashes_unchanged": true
+    },
+    {
+      "model": "UniversalRobotsUR5e/robot.urdf",
+      "backend": "auto",
+      "status": "passed",
+      "used_backend": "urdf2mjcf",
+      "body_aliases": {
+        "world": "world_urdf"
+      },
+      "source_MiB": 3.23,
+      "seconds": 4.242,
+      "statistics": {
+        "bodies": 13,
+        "joints": 6,
+        "position_coordinates": 6,
+        "degrees_of_freedom": 6,
+        "actuators": 6,
+        "geometries": 35,
+        "meshes": 34,
+        "textures": 2,
+        "sensors": 5,
+        "total_mass": 21.7
+      },
+      "checked_explicit_inertias": 7,
+      "max_tensor_absolute_error": 5.551115123125783e-17,
+      "worker_peak_RSS_MiB": 489.7,
+      "child_peak_RSS_MiB": 156.7,
+      "relocation_verified": true,
+      "source_hashes_unchanged": true
+    }
+  ]
+}
