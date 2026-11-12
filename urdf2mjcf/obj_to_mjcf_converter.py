@@ -47,6 +47,8 @@ class OBJ2MJCFImporter:
 
         Numeric suffixes in input filenames are ordinary names. Generated XML
         determines part order and excludes stale files left by earlier runs.
+        After run(), only that run's successful input/output pairs are used.
+        Before run(), pre-existing generated trees can be inspected directly.
         Ambiguous input basenames cannot be represented by this map and fail
         explicitly instead of silently merging unrelated meshes.
         """
