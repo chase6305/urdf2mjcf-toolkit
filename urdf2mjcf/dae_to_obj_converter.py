@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,17 @@ from typing import Any
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
+
+
+def _output_signature(path: Path) -> tuple[int, int, int, int] | None:
+    """Identify an existing regular output without reading its mesh bytes."""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 class DAE2OBJConverter:
@@ -159,6 +171,16 @@ class DAE2OBJConverter:
                 return results
 
             results = {str(path): (False, []) for path in dae_files}
+            expected_outputs = {}
+            for dae_file in dae_files:
+                relative = dae_file.relative_to(input_dir)
+                output = (
+                    output_dir
+                    / relative.parent
+                    / dae_file.stem
+                    / f"{dae_file.stem}.obj"
+                )
+                expected_outputs[dae_file] = (output, _output_signature(output))
             self.logger.info(f"Found {len(dae_files)} DAE files")
             self.check_blender_available()
 
@@ -174,12 +196,11 @@ class DAE2OBJConverter:
             if success:
                 # Collect results
                 for dae_file in dae_files:
-                    relative_path = dae_file.relative_to(input_dir)
-                    output_subdir = output_dir / relative_path.parent / dae_file.stem
-
-                    # Find generated OBJ files
-                    obj_files = list(output_subdir.glob("*.obj"))
-                    results[str(dae_file)] = (bool(obj_files), sorted(obj_files))
+                    output, previous = expected_outputs[dae_file]
+                    current = _output_signature(output)
+                    changed = current is not None and current != previous
+                    obj_files = [output] if changed else []
+                    results[str(dae_file)] = (changed, obj_files)
 
                     self.logger.debug(
                         f"  {dae_file.name}: Generated {len(obj_files)} OBJ files"
@@ -505,6 +526,8 @@ else:
     ) -> tuple[bool, list[Path]]:
         """Run Blender for single file conversion"""
         try:
+            output = output_dir / f"{Path(dae_name).stem}.obj"
+            previous = _output_signature(output)
             # Create temporary script file
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
                 f.write(script)
@@ -539,9 +562,15 @@ else:
                     if result.stderr:
                         self.logger.debug(f"Blender error output: {result.stderr}")
 
-                # Check generated OBJ files
-                obj_files = list(output_dir.glob(f"{Path(dae_name).stem}*.obj"))
-                success = result.returncode == 0 and len(obj_files) > 0
+                # The script exports exactly this file. A stale or similarly
+                # named OBJ does not prove that this conversion produced output.
+                current = _output_signature(output)
+                success = (
+                    result.returncode == 0
+                    and current is not None
+                    and current != previous
+                )
+                obj_files = [output] if success else []
 
                 if success:
                     self.logger.debug(
