@@ -149,7 +149,14 @@ class MJCFEditor:
             return False
 
         # Prefer the explicit root body name; otherwise fall back to the first body.
-        root_body = worldbody.find(f"./body[@name='{root_body_name}']")
+        root_body = next(
+            (
+                body
+                for body in worldbody.findall("body")
+                if body.get("name") == root_body_name
+            ),
+            None,
+        )
         if root_body is None:
             root_body = worldbody.find("./body")
         if root_body is None:
@@ -174,7 +181,14 @@ class MJCFEditor:
         if worldbody is None:
             return False
 
-        root_body = worldbody.find(f"./body[@name='{root_body_name}']")
+        root_body = next(
+            (
+                body
+                for body in worldbody.findall("body")
+                if body.get("name") == root_body_name
+            ),
+            None,
+        )
         if root_body is None:
             root_body = worldbody.find("./body")
         if root_body is None:
@@ -712,11 +726,9 @@ class MJCFEditor:
             for idx, obj_path in enumerate(obj_list):
                 # Variant name.
                 tex_name = mesh_name if idx == 0 else f"{mesh_name}_{idx}"
-                # Drop the OBJ suffix before trying image extensions.
-                obj_path_no_ext = Path(obj_path).with_suffix("")
                 # Look for texture files in the same relative directory.
                 for ext in exts:
-                    tex_path = mesh_dir / obj_path_no_ext.with_suffix(ext)
+                    tex_path = mesh_dir / Path(obj_path).with_suffix(ext)
                     if tex_path.exists():
                         tex_elem = ET.Element("texture")
                         tex_elem.set("type", "2d")
@@ -726,6 +738,7 @@ class MJCFEditor:
                         asset_node.append(tex_elem)
                         break
 
+    @staticmethod
     def get_material_info_from_subxml(subxml_path, variant_name):
         """
         Parse a generated sub-XML file and return material/texture properties for a variant.
@@ -818,7 +831,7 @@ class MJCFEditor:
             if mat.attrib.get("name") == mat_name:
                 mat_elem = mat
                 break
-        if not mat_elem:
+        if mat_elem is None:
             return
         # Create a new material node and normalize shininess.
         new_mat = ET.Element("material")
@@ -887,11 +900,10 @@ class MJCFEditor:
         for mesh_name, obj_list in variant_map.items():
             for idx, obj_path in enumerate(obj_list):
                 variant_name = f"{mesh_name}_{idx}" if idx > 0 else mesh_name
-                obj_path_no_ext = Path(obj_path).with_suffix("")
                 # Look for texture files.
                 tex_found = False
                 for ext in exts:
-                    tex_path = mesh_dir / obj_path_no_ext.with_suffix(ext)
+                    tex_path = mesh_dir / Path(obj_path).with_suffix(ext)
                     if tex_path.exists():
                         # Create texture node.
                         tex_elem = ET.Element("texture")
@@ -1004,7 +1016,10 @@ class MJCFEditor:
                                             asset_node.append(mat_elem)
                                         break
 
-                if asset_node.find(f"material[@name='{variant_name}']") is None:
+                if not any(
+                    material.get("name") == variant_name
+                    for material in asset_node.findall("material")
+                ):
                     original_name = mesh_to_material.get(mesh_name)
                     attributes = material_props.get(original_name, {}).copy()
                     attributes["name"] = variant_name

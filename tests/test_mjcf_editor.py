@@ -74,6 +74,75 @@ def test_explicit_free_joint_is_recognized(tmp_path):
     assert editor.root.find(".//joint") is None
 
 
+def test_root_names_with_quotes_are_matched_literally(tmp_path):
+    editor = MJCFEditor(_write_model(tmp_path, ""))
+    worldbody = editor.root.find("worldbody")
+    other = ET.SubElement(worldbody, "body", name="other")
+    ET.SubElement(other, "freejoint")
+    name = 'base\'s "frame"'
+    selected = ET.SubElement(worldbody, "body", name=name)
+    ET.SubElement(selected, "freejoint")
+    assert editor.fix_base(name)
+    assert selected.find("freejoint") is None
+    assert other.find("freejoint") is not None
+    assert editor.ensure_freejoint(name)
+    assert len(selected.findall("freejoint")) == 1
+
+
+def test_material_fallback_accepts_literal_names_with_quotes_and_dots(tmp_path):
+    editor = MJCFEditor(_write_model(tmp_path, "<body/>"))
+    name = "arm's.v2"
+    ET.SubElement(editor.root.find("worldbody/body"), "geom", mesh=name, material=name)
+    ET.SubElement(
+        editor.root.find("asset"), "material", name=name, rgba="0.2 0.3 0.4 1"
+    )
+    editor.remap_materials_and_textures_for_mesh_variants_with_xml(
+        {name: [f"{name}.obj"]}, tmp_path
+    )
+    material = next(
+        mat for mat in editor.root.findall("asset/material") if mat.get("name") == name
+    )
+    assert material.get("rgba") == "0.2 0.3 0.4 1"
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "add_textures_for_mesh_variants",
+        "remap_materials_and_textures_for_mesh_variants_with_xml",
+    ],
+)
+def test_texture_lookup_preserves_dots_in_the_object_stem(tmp_path, method):
+    editor = MJCFEditor(_write_model(tmp_path, "<body/>"))
+    directory = tmp_path / "parts"
+    directory.mkdir()
+    (directory / "arm.v2_0.png").touch()
+    (directory / "arm.png").touch()
+    getattr(editor, method)({"arm.v2": ["parts/arm.v2_0.obj"]}, tmp_path)
+    assert editor.root.find("asset/texture").get("file") == "parts/arm.v2_0.png"
+
+
+def test_material_helpers_import_self_closing_material_elements(tmp_path):
+    directory = tmp_path / "parts"
+    directory.mkdir()
+    source = directory / "mesh.xml"
+    source.write_text(
+        '<mujoco><asset><material name="paint" rgba="0.2 0.3 0.4 1" specular="0.6"/></asset><worldbody><body><geom mesh="arm" material="paint"/></body></worldbody></mujoco>'
+    )
+    editor = MJCFEditor(_write_model(tmp_path, "<body/>"))
+    expected = {"name": "paint", "rgba": "0.2 0.3 0.4 1", "specular": "0.6"}
+    assert editor.get_material_info_from_subxml(source, "arm")["material"] == expected
+    assert (
+        MJCFEditor.get_material_info_from_subxml(source, "arm")["material"] == expected
+    )
+    editor.add_material_from_subxml_if_no_texture("arm", ["parts/mesh.obj"], tmp_path)
+    material = editor.root.find("asset/material")
+    assert material is not None
+    assert material.get("name") == "arm"
+    assert material.get("rgba") == expected["rgba"]
+    assert material.get("specular") == expected["specular"]
+
+
 def test_floating_base_rejects_existing_hinge(tmp_path):
     import pytest
 
