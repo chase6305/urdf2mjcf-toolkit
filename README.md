@@ -105,6 +105,8 @@ Mesh instances retain their exact source file and scale even when OBJ/STL filena
 
 Inertia recalculation combines all geometries of the selected category, including mesh scales and frame rotations. It supports closed solid meshes and analytic box, sphere, and cylinder shapes, preserves existing mass, and assumes uniform density with additive component volumes. Any failed link aborts the source-file update.
 
+When a link omits `<inertial>`, the importer/MuJoCo may infer mass and inertia from geometry. The report's `statistics.total_mass` describes the compiled model and can exceed the sum of explicit URDF masses. The inertia preservation checks compare explicit source definitions.
+
 ## Checks and JSON Reports
 
 Inspect a URDF before conversion:
@@ -225,6 +227,8 @@ urdf-inertia robot.urdf --only-invalid --geometry collision
 ```
 
 The standalone command updates the input in place and keeps a `.urdf.backup` when it makes changes. If all definitions are valid, `--only-invalid` writes nothing. Python callers can use `calculator.update_inertia(only_invalid=True)` and inspect `calculator.updated_links` after success. Omitting this flag retains explicit full recalculation of all eligible links.
+
+Recalculation preserves each link's existing mass; a uniform `--density` cancels during mass normalization. `--scale` changes geometry dimensions while retaining geometry and joint origins. The default eigenvalue floor is `max(1e-8, 1e-6 * trace(inertia))` in kg m²; `--enforce-min-eig` can raise that floor. Set both `--regularize-abs-tol` and `--regularize-rel-tol` to `0` to keep valid computed moments without this floor. Finite positive moments and the triangle rule are still required.
 
 Regularization tolerances and the optional minimum eigenvalue must be finite and nonnegative. Invalid parameters or numerical overflow abort the update before writing the URDF.
 

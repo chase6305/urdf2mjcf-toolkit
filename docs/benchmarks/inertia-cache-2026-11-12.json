@@ -1,0 +1,36 @@
+{
+  "measured_at_utc": "2026-11-12T13:30:47.104474+00:00",
+  "python": "3.12.14",
+  "versions": {
+    "numpy": "2.5.4",
+    "trimesh": "5.2.0",
+    "urdf2mjcf-toolkit": "0.1.0"
+  },
+  "cpu_affinity": [
+    31
+  ],
+  "instances": 24,
+  "faces_per_mesh": 5120,
+  "samples_seconds": {
+    "cached": [
+      0.010031824000179768,
+      0.010040841007139534,
+      0.009890697001537774
+    ],
+    "uncached": [
+      0.18989112000417663,
+      0.1857430449963431,
+      0.18494797099992866
+    ]
+  },
+  "median_seconds": {
+    "cached": 0.010031824000179768,
+    "uncached": 0.1857430449963431
+  },
+  "mesh_loads_per_update": {
+    "uncached": 24,
+    "cached": 1
+  },
+  "speedup": 18.515381150328658,
+  "outputs_identical": true
+}

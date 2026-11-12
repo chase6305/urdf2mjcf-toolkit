@@ -100,6 +100,8 @@ OBJ/STL 在不同目录中同名，或文件名与自动生成的缩放后缀相
 
 惯量重算会汇总选定类别的全部几何体，处理网格缩放和坐标系旋转；支持封闭实体网格及长方体、球、圆柱的解析计算。它保留已有质量，假设均匀密度且各组件体积可相加；任何 link 计算失败都不会写入部分更新。
 
+link 省略 `<inertial>` 时，导入器/MuJoCo 可能从几何推断质量和惯量。报告的 `statistics.total_mass` 是编译模型的总质量，可能高于 URDF 显式质量的合计；惯量保留检查针对显式源定义进行对比。
+
 ## 转换前检查与 JSON 报告
 
 ```bash
@@ -220,6 +222,8 @@ urdf-inertia robot.urdf --only-invalid --geometry collision
 独立惯量命令会原地更新输入，并在发生修改时保留 `.urdf.backup`。所有定义有效时，`--only-invalid` 不写入任何文件。Python 可调用 `calculator.update_inertia(only_invalid=True)`，成功后通过 `calculator.updated_links` 查看修改对象。不加该选项时，仍会按明确请求重算所有符合条件的 link。
 
 正则化容差及可选的最小特征值必须有限且非负。参数无效或计算溢出时，会在写入 URDF 前终止更新。
+
+重算保留各 link 的原质量；均匀 `--density` 在质量归一化中抵消。`--scale` 调整几何尺寸，保留几何和关节的 origin。默认特征值下限为 `max(1e-8, 1e-6 * trace(inertia))`，单位为 kg m²；`--enforce-min-eig` 可以进一步提高下限。将 `--regularize-abs-tol` 和 `--regularize-rel-tol` 都设为 `0` 可保留有效计算结果而不施加此下限，仍会检查有限性、正定性及主惯量三角不等式。
 
 同一次惯量更新中，相同网格及有效缩放会复用其单位密度质量属性，各实例的坐标变换及各 link 的质量单独计算。计算属性后释放三角网格对象；更新结束即丢弃缓存，后续调用会读取修改后的源网格。
 

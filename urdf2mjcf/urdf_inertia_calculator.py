@@ -505,10 +505,13 @@ def main() -> int:
         "--density",
         type=float,
         default=None,
-        help="Optional material density in kg/m^3.",
+        help="Optional uniform density in kg/m^3; mass normalization cancels it and URDF masses are preserved.",
     )
     parser.add_argument(
-        "--scale", type=float, default=1.0, help="Uniform mesh scale factor."
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Uniform geometry-size factor; geometry and joint origins are not scaled.",
     )
     parser.add_argument("--regularize-rel-tol", type=float, default=1e-6)
     parser.add_argument("--regularize-abs-tol", type=float, default=1e-8)
