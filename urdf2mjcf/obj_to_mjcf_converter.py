@@ -2,11 +2,16 @@ import os
 import shutil
 import stat
 import subprocess
-import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from pathlib import Path
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.obj_assets import (
+    BACKUP_PREFIX,
+    generated_obj_paths,
+    preserve_obj_outputs,
+    protect_obj_inputs,
+)
 
 
 def _output_signature(path: Path) -> tuple[int, int, int, int] | None:
@@ -115,7 +120,9 @@ class OBJ2MJCFImporter:
             owners[name] = owner
 
         for current, children, files in os.walk(root):
-            children.sort()
+            children[:] = sorted(
+                name for name in children if not name.startswith(BACKUP_PREFIX)
+            )
             directory = Path(current)
             subxml = directory / f"{directory.name}.xml"
             current_output = (
@@ -123,41 +130,7 @@ class OBJ2MJCFImporter:
             )
             if current_output and subxml.is_file():
                 children.clear()
-                try:
-                    model = ET.parse(subxml).getroot()
-                except ET.ParseError as exc:
-                    raise ValueError(
-                        f"Invalid generated MJCF: {subxml}: {exc}"
-                    ) from exc
-                if model.tag != "mujoco":
-                    raise ValueError(f"Expected <mujoco> in generated MJCF: {subxml}")
-                visual_meshes = {
-                    geom.get("mesh")
-                    for geom in model.iter("geom")
-                    if geom.get("class") not in {"collision", "collisiongeom"}
-                }
-                compiler = model.find("compiler")
-                meshdir = compiler.get("meshdir", "") if compiler is not None else ""
-                parts = []
-                for mesh in model.findall("asset/mesh"):
-                    filename = mesh.get("file", "")
-                    if mesh.get("name", Path(filename).stem) not in visual_meshes:
-                        continue
-                    path = (directory / meshdir / filename).resolve()
-                    if not path.is_relative_to(directory):
-                        raise ValueError(
-                            f"Generated mesh escapes its asset directory: {path}"
-                        )
-                    if path.suffix.lower() != ".obj" or not path.is_file():
-                        raise ValueError(
-                            f"Generated OBJ mesh is missing or invalid: {path}"
-                        )
-                    if path not in parts:
-                        parts.append(path)
-                if not parts:
-                    raise ValueError(
-                        f"Generated MJCF contains no visual OBJ assets: {subxml}"
-                    )
+                parts = generated_obj_paths(subxml, directory)
                 register(directory.name, parts, subxml)
                 generated_sources.add((directory.parent, directory.name))
             else:
@@ -190,8 +163,15 @@ class OBJ2MJCFImporter:
             self.logger.info(f"Processing obj2mjcf: {d}")
             try:
                 expected = _expected_models(d)
+                sources = sorted(
+                    path
+                    for path in d.iterdir()
+                    if path.is_file() and path.suffix.lower() == ".obj"
+                )
+                outputs = sorted({path.parent for path in expected})
+                protect_obj_inputs(sources, outputs)
                 previous = {path: _output_signature(path) for path in expected}
-                with _obj_input_aliases(d):
+                with _obj_input_aliases(d), preserve_obj_outputs(outputs, self.logger):
                     result = subprocess.run(
                         [obj2mjcf_path, "--obj-dir", ".", "--overwrite", "--save-mjcf"],
                         cwd=str(d),
@@ -200,19 +180,20 @@ class OBJ2MJCFImporter:
                         stderr=subprocess.STDOUT,
                         text=True,
                     )
-                self.logger.debug(result.stdout)
-                stale = [
-                    path
-                    for path in sorted(expected)
-                    if (current := _output_signature(path)) is None
-                    or current == previous[path]
-                ]
-                if stale:
-                    self.logger.error(
-                        "OBJ conversion did not update expected models: %s",
-                        ", ".join(map(str, stale)),
-                    )
-                    return False
+                    self.logger.debug(result.stdout)
+                    stale = [
+                        path
+                        for path in sorted(expected)
+                        if (current := _output_signature(path)) is None
+                        or current == previous[path]
+                    ]
+                    if stale:
+                        raise ValueError(
+                            "OBJ conversion did not update expected models: "
+                            + ", ".join(map(str, stale))
+                        )
+                    for model in sorted(expected):
+                        generated_obj_paths(model, model.parent)
                 return True
             except FileNotFoundError:
                 self.logger.error(
@@ -276,7 +257,8 @@ class OBJ2MJCFImporter:
             children[:] = sorted(
                 name
                 for name in children
-                if not (
+                if not name.startswith(BACKUP_PREFIX)
+                and not (
                     name in input_stems and (directory / name / f"{name}.xml").is_file()
                 )
             )

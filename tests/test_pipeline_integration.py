@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import trimesh
 
+from urdf2mjcf.obj_to_mjcf_converter import OBJ2MJCFImporter
 from urdf2mjcf.urdf_to_mujoco_converter import MujocoConversionManager
 
 
@@ -146,6 +147,42 @@ def _painted_obj(path):
     path.with_name("colors.mtl").write_text(
         "newmtl red\nKd 1 0 0\nnewmtl green\nKd 0 1 0\n"
     )
+
+
+def test_standalone_obj_failed_rerun_preserves_compilable_previous_outputs(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+    )
+    source = tmp_path / "arm.obj"
+    _painted_obj(source)
+    importer = OBJ2MJCFImporter(tmp_path)
+    assert importer.handle_dir(tmp_path)
+    output = tmp_path / "arm"
+    xml = output / "arm.xml"
+    original = {
+        path.relative_to(output): path.read_bytes()
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    compiled = mujoco.MjModel.from_xml_path(str(xml))
+    source.write_text("mtllib missing.mtl\n" + source.read_text())
+    invalid_input = source.read_bytes()
+
+    assert not importer.handle_dir(tmp_path)
+
+    assert source.read_bytes() == invalid_input
+    assert {
+        path.relative_to(output): path.read_bytes()
+        for path in output.rglob("*")
+        if path.is_file()
+    } == original
+    restored = mujoco.MjModel.from_xml_path(str(xml))
+    for field in ("mesh_vert", "mesh_face", "geom_size", "mat_rgba"):
+        np.testing.assert_array_equal(
+            getattr(restored, field), getattr(compiled, field)
+        )
 
 
 @pytest.mark.parametrize("suffix", ["obj", "OBJ", "Obj"])
