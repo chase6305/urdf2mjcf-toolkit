@@ -140,6 +140,64 @@ def validate_urdf_structure(robot: ET.Element) -> None:
         raise URDFValidationError(issues)
 
 
+def _material_issues(robot: ET.Element) -> list[dict]:
+    """Reject invalid colors and material choices interpreted differently by importers."""
+    issues = []
+
+    def issue(code, message, context, **attributes):
+        location = ", ".join(f"{key}={value!r}" for key, value in context.items())
+        issues.append(
+            {
+                "severity": "error",
+                "code": code,
+                "message": f"{location}: {message}",
+                **context,
+                **attributes,
+            }
+        )
+
+    globals_ = robot.findall("material")
+    for name, count in sorted(Counter(m.get("name", "") for m in globals_).items()):
+        if count > 1:
+            issue(
+                "duplicate_material",
+                "Global material name must be unique",
+                {"material": name, "scope": "robot"},
+            )
+    materials = [(m, {"scope": "robot"}) for m in globals_]
+    for link in robot.findall("link"):
+        for index, visual in enumerate(link.findall("visual")):
+            context = {"link": link.get("name"), "kind": "visual", "index": index}
+            definitions = visual.findall("material")
+            if len(definitions) > 1:
+                issue(
+                    "ambiguous_definition",
+                    "Multiple <material> elements: "
+                    + repr([m.get("name") for m in definitions]),
+                    context,
+                    element="material",
+                )
+            materials.extend((m, context) for m in definitions)
+    for material, location in materials:
+        context = {**location, "material": material.get("name", "")}
+        for tag in ("color", "texture"):
+            if len(material.findall(tag)) > 1:
+                issue(
+                    "ambiguous_definition",
+                    f"Multiple <{tag}> elements in <material>",
+                    context,
+                    element=tag,
+                )
+        for color in material.findall("color"):
+            try:
+                rgba = vector(color.get("rgba", ""), 4)
+                if np.any((rgba < 0) | (rgba > 1)):
+                    raise ValueError("RGBA components must be between 0 and 1")
+            except ValueError as exc:
+                issue("invalid_material", str(exc), context, element="color")
+    return issues
+
+
 def physical_issues(robot: ET.Element) -> list[dict]:
     """Collect physical input errors and known conversion limitations.
 
@@ -288,7 +346,7 @@ def physical_issues(robot: ET.Element) -> list[dict]:
             if key in issue
         )
         issue["message"] = f"{context}: {issue['message']}"
-    return declaration_issues(robot) + issues
+    return declaration_issues(robot) + _material_issues(robot) + issues
 
 
 def validate_urdf_physics(robot: ET.Element) -> None:

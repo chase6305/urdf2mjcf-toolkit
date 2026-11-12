@@ -277,7 +277,7 @@ def rename_reserved_body_names(mjcf: ET.Element) -> dict[str, str]:
 
 
 def validate_compiled_physics(model) -> None:
-    """Compilation alone permits infinity in some physical model arrays."""
+    """Reject non-finite physical and visual data accepted by the compiler."""
     for name in (
         "body_mass",
         "body_subtreemass",
@@ -299,6 +299,8 @@ def validate_compiled_physics(model) -> None:
         "geom_size",
         "mesh_vert",
         "mesh_scale",
+        "geom_rgba",
+        "mat_rgba",
     ):
         if not np.all(np.isfinite(getattr(model, name))):
-            raise ValueError(f"Compiled model has non-finite physical values: {name}")
+            raise ValueError(f"Compiled model has non-finite values: {name}")

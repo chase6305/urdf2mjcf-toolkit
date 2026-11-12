@@ -116,6 +116,8 @@ urdf2mjcf-toolkit robot.urdf ./output --backend auto --report ./reports/conversi
 
 转换会在复制或转换网格资源前检查 XML、拓扑和物理定义。无法继续处理的定义在 `input_validation` 阶段失败，报告的 `issues` 包含具体诊断。启用自动惯量恢复时，无效惯量仍进入选择性修复流程；禁用恢复时，无效惯量也会在资源处理前被拒绝。
 
+颜色必须包含四个有限且位于 `[0, 1]` 的 RGBA 分量，否则报告 `invalid_material`；重复的全局材质名报告 `duplicate_material`。同一个 visual 中的多个 material、同一材质内重复的 color 或 texture 报告 `ambiguous_definition`。不同 visual 仍可共用 inline 材质名。所有后端都在资源处理前执行这些检查，最终编译还会拒绝非有限的几何体或材质颜色。
+
 检查时不调用转换器，也不创建转换输出目录。网格内容、纹理、隐式推断的惯量和编译后的动力学仍需通过实际转换与 MuJoCo 校验；检查通过不代表转换一定成功。velocity 上限会产生 `velocity_limit_unenforced` 提示，说明速度约束需要控制器实现。只有 warning 时，检查状态仍为 `passed`，退出码为 `0`。检查模式忽略转换专用选项，仅将请求的后端记录为上下文。
 
 `--report` 可在成功或失败时保存 JSON。转换报告包含请求与实际使用的后端、每次后端尝试及错误、失败阶段、耗时、转换选项、惯量恢复尝试次数，以及最终编译模型的统计信息。刚体数量不含 world，几何体数量包含自动添加的地面。检查报告包含带错误码的问题列表及网格引用的解析路径。报告使用 `schema_version: 1`；检查状态为 `passed`/`failed`，转换状态为 `success`/`failed`。成功退出码为 `0`，检查、转换或报告写入失败为 `1`，命令行语法错误为 `2`。报告路径须以 `.json` 结尾，不能覆盖输入文件；已有报告通过原子替换更新。
@@ -263,6 +265,8 @@ python kit/visualize_mujoco.py output/robot.xml
 支持 `visual/`、`meshes/visual/`，以及 `urdf/robot.urdf` 配合相邻 `meshes/visual/` 的目录布局；碰撞目录同理。网格引用支持相对路径、绝对路径、`file://` 和能在本地目录层级找到的 `package://` 路径。优先使用转换后的 OBJ，无法确定唯一文件时明确报错。
 
 这些目录之外，被 URDF 引用的 DAE、GLB、PLY、OFF、3MF 也会自动转换；显式碰撞引用无需启用 `--export-collision`。每次运行中，指向同一实际源文件的引用共用一次转换，`auto` 切换后端时也会复用预处理结果。补充转换按不同源路径分配独立名称，分别保存不同目录中的同名文件；常规目录处理仍会拒绝争用同一转换文件名的源文件。OBJ/STL 引用继续采用直接导入与最终资源收集。
+
+OBJ 材质处理支持 `.OBJ` 及混合大小写扩展名。调用外部命令时临时提供小写入口，保留相对 MTL/纹理引用，并在成功或失败后清理。同一目录中的同 stem 输入（如 `arm.obj` 与 `arm.OBJ`）会在转换前失败，避免争用同一生成模型。
 
 任何必需的网格转换失败都会使主命令返回非零状态。中间 XML 和暂存 URDF 会自动清理；转换、资源复制、校验或发布失败时，保留已有输出 XML 和资源。重复运行会重新转换源网格，并跳过 `obj2mjcf` 已生成的资源子树。
 
