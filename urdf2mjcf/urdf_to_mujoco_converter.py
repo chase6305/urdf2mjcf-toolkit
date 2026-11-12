@@ -476,6 +476,11 @@ class MujocoConversionManager:
             else:
                 self.logger.info("Root body is already fixed.")
         else:
+            roots = editor.root.findall("worldbody/body")
+            if len(roots) != 1:
+                raise ValueError(
+                    f"Floating-base conversion requires exactly one root body; found {len(roots)}"
+                )
             if editor.ensure_freejoint(root_body_name="root"):
                 self.logger.info(
                     "Floating-base enabled: inserted <freejoint> under root body."

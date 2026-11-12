@@ -106,6 +106,34 @@ def test_zero_effort_retains_passive_motion_and_disables_generated_actuation(
     )
 
 
+@pytest.mark.parametrize("backend", ["mujoco", "urdf2mjcf"])
+@pytest.mark.parametrize("overflow", ["subtree_mass", "joint_inertia"])
+def test_finite_inputs_cannot_publish_overflowing_derived_dynamics(
+    tmp_path, backend, overflow
+):
+    source = tmp_path / "robot.urdf"
+    valid = """<robot name="overflow"><link name="base"><inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1"/></inertial><visual><geometry><box size="1 1 1"/></geometry></visual></link><link name="arm"><inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1"/></inertial><visual><geometry><box size="1 1 1"/></geometry></visual></link><joint name="hinge" type="revolute"><parent link="base"/><child link="arm"/><limit lower="-1" upper="1" effort="10"/></joint></robot>"""
+    source.write_text(valid)
+    manager = MujocoConversionManager(source, tmp_path / "output", backend=backend)
+    output = manager.run()
+    previous = output.read_bytes()
+    root = ET.fromstring(valid)
+    if overflow == "subtree_mass":
+        for mass in root.findall("link/inertial/mass"):
+            mass.set("value", "1e308")
+    else:
+        ET.SubElement(
+            root.find("link[@name='arm']/inertial"), "origin", xyz="0 1e200 0"
+        )
+    ET.ElementTree(root).write(source)
+    original = source.read_bytes()
+    with pytest.raises((ValueError, RuntimeError)):
+        manager.run()
+    assert output.read_bytes() == previous
+    assert source.read_bytes() == original
+    assert manager.last_report["status"] == "failed"
+
+
 @pytest.mark.parametrize("backend", ["urdf2mjcf", "mujoco"])
 @pytest.mark.parametrize("floating", [False, True])
 def test_joint_kinematics_and_full_inertia_match_analytic_values(

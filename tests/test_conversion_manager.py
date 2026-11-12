@@ -106,6 +106,32 @@ def test_relative_input_has_named_default_output(tmp_path, monkeypatch):
     assert manager.output_dir == tmp_path.parent / f"{tmp_path.name}_mjcf"
 
 
+@pytest.mark.parametrize("children", [0, 2])
+def test_floating_base_cannot_silently_float_only_part_of_a_world_root_model(
+    tmp_path, children
+):
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        '<robot name="valid"><link name="base"><inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1"/></inertial><visual><geometry><box size="1 1 1"/></geometry></visual></link></robot>'
+    )
+    manager = MujocoConversionManager(
+        source, tmp_path / "output", backend="mujoco", fixed_base=False
+    )
+    output = manager.run()
+    previous = output.read_bytes()
+    links = '<link name="world"/>'
+    for index in range(children):
+        links += f'<link name="body{index}"><inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1"/></inertial><visual><geometry><box size="1 1 1"/></geometry></visual></link><joint name="fixed{index}" type="fixed"><parent link="world"/><child link="body{index}"/></joint>'
+    source.write_text(f'<robot name="world_root">{links}</robot>')
+    original = source.read_bytes()
+    with pytest.raises(ValueError, match="exactly one root body"):
+        manager.run()
+    assert output.read_bytes() == previous
+    assert source.read_bytes() == original
+    assert manager.last_report["status"] == "failed"
+    assert manager.last_report["options"]["fixed_base"] is False
+
+
 def test_nested_asset_layout_is_recognized(tmp_path):
     source = tmp_path / "urdf/robot.urdf"
     source.parent.mkdir()

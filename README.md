@@ -264,6 +264,10 @@ The output `meshes/` directory must not contain the input URDF or a referenced s
 
 DAE conversion falls back to trimesh/pycollada when Blender is unavailable or its Collada importer fails. Scene transforms are applied before meshes are merged.
 
+GLB conversion merges compatible material instances and retains distinct material groups in the same OBJ. `--no-merge` preserves every geometry group. Named materials, solid diffuse colors, and each material's base-color texture keep separate bindings; extracted image names are generated locally rather than used as paths. Explicit MJCF colors and texture bindings take precedence over filename-based texture discovery. This does not reproduce the complete glTF PBR shading model.
+
+Missing absolute mesh paths, `file://` paths, and parent-directory references fail explicitly. Basename compatibility lookup remains available for ordinary relative references.
+
 ## Output Layout
 
 A typical output directory looks like this:

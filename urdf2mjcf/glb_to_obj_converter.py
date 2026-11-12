@@ -13,8 +13,8 @@ Examples:
     # Convert a single GLB file.
     python -m urdf2mjcf.glb_to_obj_converter model.glb -o converted_models
 
-    # By default, GLB geometry is merged into one mesh to avoid many small *_0.obj files downstream.
-    # Use --no-merge to preserve geometry grouping.
+    # By default, compatible GLB geometry is merged while distinct materials retain their groups.
+    # Use --no-merge to preserve all geometry grouping.
 
     # Convert all GLB files in a directory.
     python -m urdf2mjcf.glb_to_obj_converter ./models/ -o ./output/
@@ -833,7 +833,7 @@ def main() -> int:
     parser.add_argument(
         "--no-merge",
         action="store_true",
-        help="Do not merge GLB geometries. This may generate multiple small OBJ files downstream.",
+        help="Preserve every GLB geometry group. The default merges compatible materials.",
     )
     args = parser.parse_args()
 
