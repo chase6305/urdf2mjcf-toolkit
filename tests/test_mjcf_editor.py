@@ -34,6 +34,27 @@ def test_ground_plane_setup_is_idempotent(tmp_path):
     assert len(editor.root.findall(".//geom[@name='floor']")) == 1
 
 
+@pytest.mark.parametrize(
+    "attributes", [{"rgba": "1 0 0 1"}, {"texture": "exact_source"}]
+)
+def test_texture_heuristics_preserve_explicit_materials(tmp_path, attributes):
+    editor = MJCFEditor(_write_model(tmp_path))
+    asset = editor.root.find("asset")
+    ET.SubElement(asset, "mesh", name="arm", file="visual/arm.obj")
+    material = ET.SubElement(asset, "material", name="arm", **attributes)
+    visual = tmp_path / "meshes/visual"
+    visual.mkdir(parents=True)
+    (visual / "arm.obj").touch()
+    (visual / "albedo.png").touch()
+    original = material.attrib.copy()
+    assert (
+        editor.add_textures_and_link_materials_for_visual_meshes(tmp_path / "meshes")
+        == 0
+    )
+    assert material.attrib == original
+    assert asset.findall("texture") == []
+
+
 def test_save_writes_parseable_indented_xml(tmp_path):
     editor = MJCFEditor(_write_model(tmp_path))
     destination = tmp_path / "result.xml"

@@ -536,6 +536,9 @@ class MJCFEditor:
                 continue
             if not mesh_file.startswith("visual/"):
                 continue
+            mat = materials_by_name.get(mesh_name)
+            if mat is not None and ("texture" in mat.attrib or "rgba" in mat.attrib):
+                continue
 
             obj_abs = meshes_dir / mesh_file
             if not obj_abs.exists():
@@ -561,7 +564,6 @@ class MJCFEditor:
                 existing_textures.add(tex_name)
                 added += 1
 
-            mat = materials_by_name.get(mesh_name)
             if mat is None:
                 mat = ET.Element("material")
                 mat.set("name", mesh_name)

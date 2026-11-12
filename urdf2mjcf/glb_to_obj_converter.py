@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import struct
@@ -84,7 +85,32 @@ class GLB2OBJConverter:
         Merging the GLB scene first keeps downstream output compact by default.
         """
 
-        return MeshToOBJConverter._as_single_mesh(scene)
+        meshes = list(scene.geometry.values())
+        merged = MeshToOBJConverter._as_single_mesh(scene)
+        # All callers here have already baked transforms and checked material
+        # compatibility. Preserve the original UVs and material instead of
+        # relying on a texture atlas generated during trimesh concatenation.
+        if meshes and all(
+            getattr(mesh.visual, "material", None) is not None for mesh in meshes
+        ):
+            uv = None
+            if all(getattr(mesh.visual, "uv", None) is not None for mesh in meshes):
+                uv = self.np.vstack([mesh.visual.uv for mesh in meshes])
+            merged.visual = self.trimesh.visual.TextureVisuals(
+                uv=uv, material=meshes[0].visual.material.copy()
+            )
+        return merged
+
+    @staticmethod
+    def _scene_texture_filename(mesh_name: str, role: str) -> str:
+        digest = hashlib.sha256(f"{mesh_name}\0{role}".encode()).hexdigest()[:16]
+        label = (
+            role
+            if role
+            in {"albedo", "diffuse", "baseColor", "map_Kd", "texture", "auto_color"}
+            else "image"
+        )
+        return f"scene_{digest}_{label}.png"
 
     def find_glb_files(self, input_path: str) -> list[Path]:
         """Find GLB files under an input path."""
@@ -134,6 +160,10 @@ class GLB2OBJConverter:
                                 tex_value is not None
                                 and not isinstance(
                                     tex_value, (list, tuple, int, float, str)
+                                )
+                                and not (
+                                    isinstance(tex_value, self.np.ndarray)
+                                    and tex_value.ndim < 2
                                 )
                             ) and (
                                 self._save_texture_image(
@@ -186,7 +216,9 @@ class GLB2OBJConverter:
                                     img = self.Image.new("RGBA", (4, 4), (r, g, b, a))
                                 else:
                                     img = self.Image.new("RGB", (4, 4), (r, g, b))
-                                texture_filename = f"{name}_auto_color.png"
+                                texture_filename = self._scene_texture_filename(
+                                    str(name), "auto_color"
+                                )
                                 texture_path = output_folder / texture_filename
                                 img.save(texture_path)
                                 texture_mapping[str(name)] = texture_filename
@@ -235,7 +267,7 @@ class GLB2OBJConverter:
     ) -> bool:
         """Save a texture image."""
         try:
-            texture_filename = f"{texture_name}.png"
+            texture_filename = self._scene_texture_filename(mesh_name, texture_name)
             texture_path = output_folder / texture_filename
 
             if isinstance(image_data, self.Image.Image):
@@ -309,11 +341,6 @@ class GLB2OBJConverter:
 
                 for i, image_info in enumerate(gltf_data.get("images", [])):
                     try:
-                        image_name = image_info.get("name", f"texture_{i:03d}")
-                        texture_name = self._get_texture_name_from_usage(
-                            gltf_data, i, image_name
-                        )
-
                         if "bufferView" in image_info:
                             buffer_view_idx = image_info["bufferView"]
                             buffer_view = gltf_data["bufferViews"][buffer_view_idx]
@@ -324,7 +351,7 @@ class GLB2OBJConverter:
                                 image_data = bin_data[start : start + byte_length]
                                 mime_type = image_info.get("mimeType", "image/png")
                                 ext = "png" if "png" in mime_type else "jpg"
-                                texture_filename = f"{texture_name}.{ext}"
+                                texture_filename = f"texture_{i:03d}.{ext}"
                                 texture_path = output_folder / texture_filename
                                 with open(texture_path, "wb") as img_file:
                                     img_file.write(image_data)
@@ -340,7 +367,7 @@ class GLB2OBJConverter:
                                 image_data = base64.b64decode(data)
                                 mime_type = header.split(";")[0].split(":")[1]
                                 ext = "png" if "png" in mime_type else "jpg"
-                                texture_filename = f"{texture_name}.{ext}"
+                                texture_filename = f"texture_{i:03d}.{ext}"
                                 texture_path = output_folder / texture_filename
                                 with open(texture_path, "wb") as img_file:
                                     img_file.write(image_data)
@@ -467,7 +494,9 @@ class GLB2OBJConverter:
                 visual = getattr(mesh, "visual", None)
                 material = getattr(visual, "material", None)
                 mesh_material_name = getattr(material, "name", None)
-                material_name = mesh_material_name or f"material_{name}"
+                # Match the per-geometry usemtl emitted by the OBJ writer.
+                # glTF material names are optional and need not be unique.
+                material_name = f"material_{name}"
                 file_obj.write(f"newmtl {material_name}\n")
 
                 # Default material parameters.
@@ -484,8 +513,6 @@ class GLB2OBJConverter:
                         if mat.get("name") == mesh_material_name:
                             gltf_idx = idx
                             break
-                if gltf_idx is None and gltf_materials:
-                    gltf_idx = 0
                 base_color = None
                 # Read material parameters from GLB/glTF when available.
                 if (
@@ -525,37 +552,41 @@ class GLB2OBJConverter:
                         file_obj.write(f"map_Occlusion {textures['occlusion']}\n")
                         texture_written.add("map_Occlusion")
 
-                # If no real texture is mapped, use the first extracted texture as a fallback.
+                # A merged scene may have a new texture atlas unrelated to the
+                # original glTF material names. Use its own extracted image.
                 if ("map_Kd" not in texture_written) and (
                     not texture_written and texture_mapping
                 ):
-                    first_texture = next(iter(texture_mapping.values()))
-                    file_obj.write(f"map_Kd {first_texture}\n")
-                    texture_written.add("map_Kd")
+                    fallback_texture = texture_mapping.get(str(name))
+                    if fallback_texture and not fallback_texture.endswith(
+                        "_auto_color.png"
+                    ):
+                        file_obj.write(f"map_Kd {fallback_texture}\n")
+                        texture_written.add("map_Kd")
 
-                # Write Kd only when the material has a texture; otherwise keep defaults.
-                if texture_written:
-                    if base_color and len(base_color) >= 3:
-                        r, g, b = base_color[:3]
-                        if r > 1.0 or g > 1.0 or b > 1.0:
-                            r, g, b = r / 255.0, g / 255.0, b / 255.0
-                        file_obj.write(f"Kd {r:.6f} {g:.6f} {b:.6f}\n")
-                        kd_written = True
-                    elif material is not None:
-                        try:
-                            color = getattr(material, "diffuse", None)
-                            if color is not None and len(color) >= 3:
-                                r, g, b = color[:3]
-                                if r > 1.0 or g > 1.0 or b > 1.0:
-                                    r, g, b = r / 255.0, g / 255.0, b / 255.0
-                                file_obj.write(f"Kd {r:.6f} {g:.6f} {b:.6f}\n")
-                                kd_written = True
-                        except Exception as exc:
-                            self.logger.warning(
-                                f"Failed to process material color for {name}: {exc}"
-                            )
-                    if not kd_written:
-                        file_obj.write("Kd 0.8 0.8 0.8\n")
+                # Solid colors need Kd even without a texture. Atlas materials
+                # carry their own (normally white) factor; an arbitrary original
+                # glTF material would tint every part with the first color.
+                if base_color is None and material is not None:
+                    base_color = getattr(material, "baseColorFactor", None)
+                    if base_color is None:
+                        base_color = getattr(material, "diffuse", None)
+                if base_color is not None and len(base_color) >= 3:
+                    r, g, b = base_color[:3]
+                    if max(r, g, b) > 1.0:
+                        r, g, b = r / 255.0, g / 255.0, b / 255.0
+                    file_obj.write(f"Kd {r:.6f} {g:.6f} {b:.6f}\n")
+                    kd_written = True
+                if not kd_written:
+                    factor = (
+                        "1 1 1"
+                        if texture_written
+                        or isinstance(
+                            material, self.trimesh.visual.material.PBRMaterial
+                        )
+                        else "0.8 0.8 0.8"
+                    )
+                    file_obj.write(f"Kd {factor}\n")
 
                 file_obj.write(f"Ks {ks[0]:.6f} {ks[1]:.6f} {ks[2]:.6f}\n")
                 file_obj.write(f"Ns {ns:.6f}\n")
@@ -672,7 +703,7 @@ class GLB2OBJConverter:
 
             scene = self.trimesh.load(str(glb_path))
 
-            if isinstance(scene, self.trimesh.Scene) and not self.merge_meshes:
+            if isinstance(scene, self.trimesh.Scene):
                 baked = self.trimesh.Scene()
                 for node in scene.graph.nodes_geometry:
                     transform, geometry_name = scene.graph[node]
@@ -682,7 +713,18 @@ class GLB2OBJConverter:
                 scene = baked
 
             # Merge multi-geometry scenes to avoid many tiny OBJ fragments downstream.
-            if self.merge_meshes and isinstance(scene, self.trimesh.Scene):
+            compatible = True
+            if isinstance(scene, self.trimesh.Scene):
+                materials = {
+                    hash(getattr(mesh.visual, "material", None))
+                    for mesh in scene.geometry.values()
+                }
+                compatible = len(materials) <= 1
+            if (
+                self.merge_meshes
+                and isinstance(scene, self.trimesh.Scene)
+                and compatible
+            ):
                 merged_mesh = self._merge_scene_to_single_mesh(scene)
                 merged_scene = self.trimesh.Scene()
                 merged_scene.add_geometry(merged_mesh, node_name=glb_path.stem)
