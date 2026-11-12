@@ -99,6 +99,8 @@ The native backend uses [MuJoCo's URDF importer](https://mujoco.readthedocs.io/e
 
 Both backends share mesh format conversion, base settings, ground setup, and final MuJoCo validation. Errors unrelated to inertia, such as missing executables, are reported or trigger backend fallback without recalculating inertia. Automatic recovery recalculates only invalid inertia definitions in a temporary URDF, preserving valid link masses, centers of mass, and tensors. Invalid definitions that lack usable geometry or a positive finite mass fail with a link-specific error.
 
+The external URDF command can run with a toolkit checkout on `PYTHONPATH`. Its child environment omits only toolkit paths that would shadow the upstream converter; other paths and the caller's environment are preserved.
+
 Physical correctness checks and remaining limits are recorded in the [correctness audit](docs/correctness-audit.md). Conversion preserves explicit root/link inertias and joint dynamics; unsupported mimic, planar, and internal floating joints fail explicitly. Each run stages fresh assets and restores the previous XML and assets if conversion or publication fails. Output directories must be exclusive to one conversion task.
 
 Mesh instances retain their exact source file and scale even when OBJ/STL filenames match across directories or a filename resembles a generated scale suffix. Collision meshes retain their complete geometry when the same file is also used for a visual that is split by material. Native mesh aliases are temporary; the published output contains bundled runtime files.
@@ -270,6 +272,8 @@ python kit/visualize_mujoco.py output/robot.xml
 10. Compile the exact final XML with MuJoCo, then publish that XML and its assets together.
 
 Supported layouts include `visual/`, `meshes/visual/`, and `urdf/robot.urdf` alongside `meshes/visual/`, with equivalent collision layouts. Mesh references may use relative paths, absolute paths, `file://`, or `package://` references resolvable in the local directory hierarchy. Converted OBJ files take precedence; ambiguous filenames produce an explicit error.
+
+When source references resolve up front, main conversion stages the referenced visual mesh files and supporting files in their relative layout. Unrelated visual meshes are excluded from preprocessing and material import. Legacy converted OBJ references retain directory preprocessing when needed to refresh their source. `--export-collision` keeps complete collision-directory preprocessing and supplementation.
 
 Referenced DAE, GLB, PLY, OFF, and 3MF files outside these layouts are also converted automatically, including explicit collision references without `--export-collision`. Repeated references to the same resolved source share one conversion per run, and `auto` reuses preprocessing when switching backends. Supplemental conversions use distinct generated names for different source paths, preserving same-named files from separate directories. Existing directory processing still rejects sources that compete for the same converted filename. OBJ/STL references retain direct import and final asset collection.
 

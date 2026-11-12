@@ -24,7 +24,7 @@ from urdf2mjcf.native_mujoco_converter import NativeMujocoConverter
 from urdf2mjcf.obj_assets import iter_obj_dependencies
 from urdf2mjcf.obj_to_mjcf_converter import OBJ2MJCFImporter
 from urdf2mjcf.physics import validate_compiled_physics
-from urdf2mjcf.referenced_meshes import preprocess_referenced_meshes
+from urdf2mjcf.referenced_meshes import PREPROCESS_FORMATS, preprocess_referenced_meshes
 from urdf2mjcf.reporting import new_report, validate_report_path, write_report
 from urdf2mjcf.urdf_inertia_calculator import URDFInertiaCalculator
 from urdf2mjcf.urdf_to_mjcf_converter import URDF2MJCFConverter, URDFConverterBase
@@ -33,6 +33,8 @@ from urdf2mjcf.urdf_validation import (
     physical_issues,
     topology_issues,
 )
+
+_MESH_FORMATS = PREPROCESS_FORMATS | {".obj", ".stl"}
 
 
 class MujocoConversionManager:
@@ -53,6 +55,7 @@ class MujocoConversionManager:
         self.last_backend: str | None = None
         self.last_report: dict | None = None
         self._staged_asset_paths: dict[Path, Path] = {}
+        self._selected_mesh_sources: set[Path] | None = None
         self.urdf_path = Path(urdf_path).expanduser().resolve()
         self.logger = URDF2MJCFLogger.get_logger("MujocoConversionManager")
         self.fixed_base = fixed_base
@@ -142,6 +145,38 @@ class MujocoConversionManager:
         for dependency in iter_obj_dependencies(sorted(meshes)):
             self._protect_source_asset(dependency)
 
+    def _referenced_mesh_sources(self) -> set[Path] | None:
+        """Select original mesh files; defer unresolved legacy names to staging."""
+        sources = set()
+        robot = ET.parse(self.urdf_path).getroot()
+        for kind, directory in (
+            ("visual", self.visual_dir),
+            ("collision", self.collision_dir),
+        ):
+            resolver = MeshPathResolver(
+                self.urdf_path.parent, directory, prefer_converted=False
+            )
+            for mesh in robot.findall(f"link/{kind}/geometry/mesh"):
+                reference = mesh.get("filename", mesh.get("file", ""))
+                try:
+                    source = resolver.resolve(reference)
+                    if (
+                        source.suffix.lower() == ".obj"
+                        and source.parent.name == source.stem
+                        and any(
+                            path.is_file()
+                            and path.stem == source.stem
+                            and path.suffix.lower() in _MESH_FORMATS - {".obj"}
+                            for path in source.parent.parent.iterdir()
+                        )
+                    ):
+                        return None  # Refresh legacy generated OBJ names from their source.
+                except (OSError, ValueError):
+                    # Converted OBJ names may only exist after preprocessing.
+                    return None
+                sources.add(source)
+        return sources
+
     def _copy_tree(self, src: Path, dst: Path) -> None:
         """Recursively copy a directory while preserving relative layout."""
         if not src.exists():
@@ -149,11 +184,12 @@ class MujocoConversionManager:
             return
 
         file_list = [path for path in src.rglob("*") if path.is_file()]
-        self.logger.info(f"Copying {len(file_list)} assets from '{src}' to '{dst}'...")
+        self.logger.info("Scanning %s assets in '%s'...", len(file_list), src)
+        copied = 0
 
         with tqdm(
             total=len(file_list),
-            desc=f"Copying {src.name}",
+            desc=f"Staging {src.name}",
             disable=not sys.stderr.isatty(),
         ) as progress:
             for src_path in file_list:
@@ -163,11 +199,21 @@ class MujocoConversionManager:
                 if src_path.suffix.lower() == ".obj":
                     for dependency in iter_obj_dependencies([src_path]):
                         self._protect_source_asset(dependency)
+                if (
+                    src == self.visual_dir
+                    and self._selected_mesh_sources is not None
+                    and src_path.suffix.lower() in _MESH_FORMATS
+                    and source not in self._selected_mesh_sources
+                ):
+                    progress.update(1)
+                    continue
                 dst_path = dst / src_path.relative_to(src)
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dst_path)
                 self._staged_asset_paths[source] = dst_path.resolve()
+                copied += 1
                 progress.update(1)
+        self.logger.info("Copied %s source assets from '%s'", copied, src)
 
     def _convert_urdf_with_recovery(self, urdf_converter: URDFConverterBase) -> bool:
         """Convert URDF to MJCF, retrying once after inertia recalculation when enabled."""
@@ -255,7 +301,7 @@ class MujocoConversionManager:
     def _convert_mesh_directory(self, directory: Path) -> None:
         """Convert one asset tree and stop if any required mesh failed."""
         inputs = {}
-        formats = {".obj", ".dae", ".glb", ".stl", ".ply", ".off", ".3mf"}
+        formats = _MESH_FORMATS
         for source in sorted(directory.rglob("*")):
             if not source.is_file() or source.suffix.lower() not in formats:
                 continue
@@ -399,6 +445,7 @@ class MujocoConversionManager:
         self.logger.info("Starting full conversion pipeline...")
 
         self._set_stage("copy_assets")
+        self._selected_mesh_sources = self._referenced_mesh_sources()
         self._copy_tree(self.visual_dir, self.visual_output_dir)
         if self.export_collision:
             self._copy_tree(self.collision_dir, self.collision_output_dir)

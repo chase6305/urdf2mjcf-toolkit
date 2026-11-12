@@ -258,7 +258,12 @@ def test_same_named_source_formats_cannot_silently_replace_each_other(tmp_path):
     trimesh.creation.box().export(visual / "arm.obj")
     trimesh.creation.box(extents=[3, 4, 5]).export(visual / "arm.stl")
     source = tmp_path / "robot.urdf"
-    source.write_text('<robot name="test"><link name="arm"/></robot>')
+    source.write_text(
+        '<robot name="test"><link name="arm">'
+        '<visual><geometry><mesh filename="meshes/visual/arm.obj"/></geometry></visual>'
+        '<visual><geometry><mesh filename="meshes/visual/arm.stl"/></geometry></visual>'
+        "</link></robot>"
+    )
     manager = MujocoConversionManager(source, tmp_path / "output", backend="mujoco")
     with pytest.raises(ValueError, match="share a conversion name"):
         manager.run()
