@@ -111,10 +111,32 @@ def test_ambiguous_basename_is_rejected(tmp_path):
         MeshPathResolver(tmp_path, tmp_path / "assets").resolve("arm.obj")
 
 
-def test_mesh_symlink_loop_is_a_path_input_error(tmp_path):
+@pytest.mark.parametrize("prefer_converted", [False, True])
+@pytest.mark.parametrize("loop_kind", ["file", "directory"])
+def test_mesh_symlink_loop_cannot_select_a_different_source(
+    tmp_path, prefer_converted, loop_kind
+):
+    if loop_kind == "file":
+        (tmp_path / "loop.obj").symlink_to("loop.obj")
+        reference = "loop.obj"
+    else:
+        (tmp_path / "loop_dir").symlink_to("loop_dir", target_is_directory=True)
+        reference = "loop_dir/arm.obj"
+    unrelated = tmp_path / "other" / Path(reference).name
+    unrelated.parent.mkdir()
+    unrelated.write_bytes(b"unrelated geometry")
+    with pytest.raises((ValueError, OSError), match=Path(reference).name):
+        MeshPathResolver(tmp_path, tmp_path, prefer_converted=prefer_converted).resolve(
+            reference
+        )
+
+
+def test_unrelated_broken_symlinks_do_not_block_legacy_basename_lookup(tmp_path):
     (tmp_path / "loop.obj").symlink_to("loop.obj")
-    with pytest.raises((ValueError, OSError), match="loop.obj"):
-        MeshPathResolver(tmp_path, tmp_path).resolve("loop.obj")
+    exact = tmp_path / "other/arm.obj"
+    exact.parent.mkdir()
+    exact.touch()
+    assert MeshPathResolver(tmp_path, tmp_path).resolve("legacy/arm.obj") == exact
 
 
 def test_basename_fallback_indexes_assets_only_once(tmp_path, monkeypatch):

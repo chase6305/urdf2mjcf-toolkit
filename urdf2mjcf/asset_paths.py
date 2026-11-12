@@ -1,8 +1,17 @@
 """Resolve local URDF mesh references and their staged OBJ replacements."""
 
+import stat
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+
+def _is_file(path: Path) -> bool:
+    """Keep symlink loops distinct from an ordinary missing legacy path."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
 
 
 class MeshPathResolver:
@@ -28,7 +37,7 @@ class MeshPathResolver:
                 path.with_suffix(".obj"),
                 path.parent / path.stem / f"{path.stem}.obj",
             ):
-                if converted.is_file():
+                if _is_file(converted):
                     return converted.resolve()
         return path.resolve()
 
@@ -80,14 +89,14 @@ class MeshPathResolver:
         if (
             not package
             and (path.is_absolute() or ".." in path.parts)
-            and not any(candidate.is_file() for candidate in source_candidates)
+            and not any(_is_file(candidate) for candidate in source_candidates)
         ):
             raise FileNotFoundError(
                 f"Mesh file not found at explicit path: {reference}"
             )
         if self.source_map is not None or not self.prefer_converted:
             for candidate in source_candidates:
-                if candidate.is_file():
+                if _is_file(candidate):
                     resolved = candidate.resolve()
                     if self.source_map is not None and resolved in self.source_map:
                         return self._prefer_obj(self.source_map[resolved])
@@ -113,11 +122,11 @@ class MeshPathResolver:
                 staged_candidates.append(candidate)
         for candidate in staged_candidates:
             converted = self._prefer_obj(candidate)
-            if converted.is_file():
+            if _is_file(converted):
                 return converted
 
         for candidate in source_candidates:
-            if candidate.is_file():
+            if _is_file(candidate):
                 return candidate.resolve()
 
         # The same basename may belong to different links. Never select one at random.
