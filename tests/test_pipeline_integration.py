@@ -148,18 +148,21 @@ def _painted_obj(path):
     )
 
 
+@pytest.mark.parametrize("suffix", ["obj", "OBJ", "Obj"])
 def test_explicit_urdf_color_covers_all_parts_without_recoloring_other_instances(
     tmp_path,
+    suffix,
 ):
     visual = tmp_path / "meshes/visual"
     visual.mkdir(parents=True)
-    _painted_obj(visual / "arm.obj")
+    _painted_obj(visual / f"arm.{suffix}")
+    original_assets = {path.name: path.read_bytes() for path in visual.iterdir()}
     source = tmp_path / "robot.urdf"
     source.write_text(
         '<robot name="part_colors"><material name="arm"><color rgba="0 0 1 0.6"/></material>'
         '<link name="arm"><inertial><mass value="2"/><inertia ixx="2" iyy="3" izz="4"/></inertial>'
-        '<visual><geometry><mesh filename="meshes/visual/arm.obj"/></geometry><material name="arm"/></visual>'
-        '<visual><origin xyz="2 0 0"/><geometry><mesh filename="meshes/visual/arm.obj"/></geometry></visual>'
+        f'<visual><geometry><mesh filename="meshes/visual/arm.{suffix}"/></geometry><material name="arm"/></visual>'
+        f'<visual><origin xyz="2 0 0"/><geometry><mesh filename="meshes/visual/arm.{suffix}"/></geometry></visual>'
         "</link></robot>"
     )
     manager = MujocoConversionManager(source, tmp_path / "output", backend="urdf2mjcf")
@@ -177,6 +180,9 @@ def test_explicit_urdf_color_covers_all_parts_without_recoloring_other_instances
     expected = ([0, 0, 1, 0.6], [0, 0, 1, 0.6], [1, 0, 0, 1], [0, 1, 0, 1])
     for gid, rgba in zip(visual_ids, expected, strict=True):
         np.testing.assert_allclose(colors[gid], rgba, atol=1e-7)
+    assert {
+        path.name: path.read_bytes() for path in visual.iterdir()
+    } == original_assets
 
 
 def test_native_visual_named_floor_keeps_its_geometry_and_a_distinct_ground(tmp_path):

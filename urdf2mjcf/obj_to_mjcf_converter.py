@@ -1,7 +1,9 @@
 import os
+import shutil
 import stat
 import subprocess
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
@@ -24,6 +26,52 @@ def _expected_models(directory: Path) -> set[Path]:
         for path in directory.iterdir()
         if path.is_file() and path.suffix.lower() == ".obj"
     }
+
+
+@contextmanager
+def _obj_input_aliases(directory: Path):
+    """Expose mixed-case extensions to obj2mjcf's lowercase-only glob.
+
+    Keep aliases beside their source so relative MTL and texture references
+    retain their meaning. Never overwrite an existing file or keep an alias
+    after the subprocess finishes, including on failure.
+    """
+    sources = sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".obj"
+    )
+    owners = {}
+    for source in sources:
+        if source.stem in owners:
+            raise ValueError(
+                f"Ambiguous OBJ inputs share output stem {source.stem!r}: "
+                f"{owners[source.stem]} and {source}"
+            )
+        owners[source.stem] = source
+    aliases = []
+    try:
+        for source in sources:
+            if source.suffix == ".obj":
+                continue
+            alias = source.with_suffix(".obj")
+            if alias.exists() and alias.samefile(source):
+                continue  # The filesystem already resolves extensions without case.
+            try:
+                os.link(source, alias)
+            except OSError:
+                # Some filesystems do not support hard links. Exclusive creation
+                # still protects files created after the input scan.
+                with alias.open("xb") as target:
+                    aliases.append(alias)
+                    with source.open("rb") as original:
+                        shutil.copyfileobj(original, target)
+            else:
+                aliases.append(alias)
+        yield
+    finally:
+        for alias in aliases:
+            alias.unlink(missing_ok=True)
 
 
 class OBJ2MJCFImporter:
@@ -143,14 +191,15 @@ class OBJ2MJCFImporter:
             try:
                 expected = _expected_models(d)
                 previous = {path: _output_signature(path) for path in expected}
-                result = subprocess.run(
-                    [obj2mjcf_path, "--obj-dir", ".", "--overwrite", "--save-mjcf"],
-                    cwd=str(d),
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
+                with _obj_input_aliases(d):
+                    result = subprocess.run(
+                        [obj2mjcf_path, "--obj-dir", ".", "--overwrite", "--save-mjcf"],
+                        cwd=str(d),
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
                 self.logger.debug(result.stdout)
                 stale = [
                     path

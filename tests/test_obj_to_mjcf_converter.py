@@ -125,6 +125,54 @@ def test_success_requires_each_input_to_produce_a_model(
     assert OBJ2MJCFImporter(tmp_path).handle_dir(tmp_path) is complete
 
 
+@pytest.mark.parametrize("successful", [False, True])
+def test_mixed_case_obj_reaches_converter_and_temporary_alias_is_cleaned(
+    tmp_path, monkeypatch, successful
+):
+    import subprocess
+    from types import SimpleNamespace
+
+    import urdf2mjcf.obj_to_mjcf_converter as obj_module
+
+    source = tmp_path / "arm.ObJ"
+    source.write_bytes(b"original OBJ and relative material references")
+    alias = source.with_suffix(".obj")
+
+    def run(*args, **kwargs):
+        assert alias.read_bytes() == source.read_bytes()
+        if not successful:
+            raise subprocess.CalledProcessError(1, "obj2mjcf", output="invalid OBJ")
+        _generated_model(tmp_path / "arm", ["arm.obj"])
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(obj_module.subprocess, "run", run)
+    assert OBJ2MJCFImporter(tmp_path).handle_dir(tmp_path) is successful
+    assert not alias.exists()
+    assert source.read_bytes() == b"original OBJ and relative material references"
+
+
+def test_obj_inputs_with_the_same_stem_fail_before_overwriting_outputs(
+    tmp_path, monkeypatch
+):
+    import urdf2mjcf.obj_to_mjcf_converter as obj_module
+
+    lower = tmp_path / "arm.obj"
+    upper = tmp_path / "arm.OBJ"
+    lower.write_bytes(b"first mesh")
+    upper.write_bytes(b"second mesh")
+    _generated_model(tmp_path / "arm", ["arm.obj"])
+    previous = (tmp_path / "arm/arm.xml").read_bytes()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Ambiguous inputs must be rejected before running obj2mjcf")
+
+    monkeypatch.setattr(obj_module.subprocess, "run", unexpected)
+    assert not OBJ2MJCFImporter(tmp_path).handle_dir(tmp_path)
+    assert lower.read_bytes() == b"first mesh"
+    assert upper.read_bytes() == b"second mesh"
+    assert (tmp_path / "arm/arm.xml").read_bytes() == previous
+
+
 def test_run_does_not_let_old_parent_xml_hide_current_outputs(tmp_path, monkeypatch):
     parent = tmp_path / "paint"
     _generated_model(parent, ["old.obj"])
