@@ -106,7 +106,10 @@ def test_inline_shared_material_names_and_color_boundaries_are_valid(tmp_path):
 
 
 @pytest.mark.parametrize("target", ["geom", "material"])
-def test_compiler_acceptance_does_not_hide_nonfinite_visual_values(target):
+def test_compiler_acceptance_does_not_hide_nonfinite_visual_values(
+    tmp_path, monkeypatch, target
+):
+    monkeypatch.chdir(tmp_path)  # Keep MuJoCo's expected NaN warning log temporary.
     if target == "geom":
         xml = (
             '<mujoco><worldbody><geom size="1" rgba="nan 0 0 1"/></worldbody></mujoco>'
