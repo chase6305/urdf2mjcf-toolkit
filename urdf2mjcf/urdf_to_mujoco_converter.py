@@ -491,7 +491,7 @@ class MujocoConversionManager:
         self._set_stage("bundle_assets")
         assets = bundle_mjcf_assets(editor.root, self.meshes_dir)
         editor.root.find("compiler").attrib.update(
-            meshdir="meshes", texturedir="meshes", strippath="false"
+            meshdir="meshes", texturedir="meshes", strippath="false", usethread="false"
         )
         # Compile the exact published XML using its final relative directories.
         # The staging root mirrors the final XML + meshes/ layout.

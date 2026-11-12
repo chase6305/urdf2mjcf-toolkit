@@ -223,8 +223,9 @@ def restore_urdf_physics(mjcf: ET.Element, urdf: ET.Element) -> None:
                 joint.set("actuatorfrclimited", "true")
                 joint.set("actuatorfrcrange", numbers([-effort, effort]))
             else:
-                # MuJoCo rejects a zero-width joint actuatorfrcrange. Clamp
-                # each generated actuator instead, retaining the passive DoF.
+                # MuJoCo 3.8 rejects zero-width joint and actuator force ranges.
+                # Retain control slots and transmission kinematics, but make
+                # each generated motor a zero-gain, zero-bias actuator.
                 joint.set("actuatorfrclimited", "false")
                 joint.attrib.pop("actuatorfrcrange", None)
                 for actuator in mjcf.findall("actuator/*"):
@@ -232,8 +233,20 @@ def restore_urdf_physics(mjcf: ET.Element, urdf: ET.Element) -> None:
                         actuator.get("joint"),
                         actuator.get("jointinparent"),
                     ):
-                        actuator.set("forcelimited", "true")
-                        actuator.set("forcerange", "0 0")
+                        if actuator.tag != "motor":
+                            raise ValueError(
+                                f"Cannot disable unsupported actuator type: {actuator.tag}"
+                            )
+                        actuator.tag = "general"
+                        actuator.attrib.update(
+                            dyntype="none",
+                            gaintype="fixed",
+                            gainprm="0",
+                            biastype="none",
+                            biasprm="0",
+                            forcelimited="false",
+                        )
+                        actuator.attrib.pop("forcerange", None)
 
 
 def validate_compiled_physics(model) -> None:

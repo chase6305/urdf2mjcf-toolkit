@@ -38,6 +38,7 @@ class NativeMujocoConverter(URDFConverterBase):
             compiler.set("strippath", "false")
             compiler.set("discardvisual", "false")
             compiler.set("fusestatic", "false")
+            compiler.set("usethread", "false")
             self.output_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(
                 prefix="native-", dir=self.output_dir

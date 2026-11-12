@@ -91,13 +91,14 @@ def test_zero_effort_retains_passive_motion_and_disables_generated_actuation(
     assert model.nv == 1
     assert model.nu == (1 if backend == "urdf2mjcf" else 0)
     if model.nu:
-        assert bool(model.actuator_forcelimited[0])
-        np.testing.assert_array_equal(model.actuator_forcerange[0], [0, 0])
+        assert model.actuator_gainprm[0, 0] == 0
+        np.testing.assert_array_equal(model.actuator_biasprm[0], 0)
     data = mujoco.MjData(model)
     for command in (-1e6, 1e6):
         data.ctrl[:] = command
         mujoco.mj_forward(model, data)
         np.testing.assert_array_equal(data.qfrc_actuator, [0])
+        np.testing.assert_array_equal(data.actuator_force, 0)
     data.qpos[0] = 0.3
     mujoco.mj_forward(model, data)
     np.testing.assert_allclose(
