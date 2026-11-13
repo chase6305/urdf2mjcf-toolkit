@@ -13,6 +13,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from urdf2mjcf.asset_bundle import bundle_mjcf_assets, resolve_mjcf_asset_paths
+from urdf2mjcf.asset_paths import MeshPathResolver, find_asset_directory
 from urdf2mjcf.dae_to_obj_converter import DAE2OBJConverter
 from urdf2mjcf.glb_to_obj_converter import GLB2OBJConverter
 from urdf2mjcf.inspection import inspect_urdf
@@ -20,9 +21,10 @@ from urdf2mjcf.logging_utils import URDF2MJCFLogger
 from urdf2mjcf.mesh_to_obj_converter import MeshToOBJConverter
 from urdf2mjcf.mjcf_editor import MJCFEditor
 from urdf2mjcf.native_mujoco_converter import NativeMujocoConverter
+from urdf2mjcf.obj_assets import iter_obj_dependencies
 from urdf2mjcf.obj_to_mjcf_converter import OBJ2MJCFImporter
 from urdf2mjcf.physics import validate_compiled_physics
-from urdf2mjcf.referenced_meshes import preprocess_referenced_meshes
+from urdf2mjcf.referenced_meshes import PREPROCESS_FORMATS, preprocess_referenced_meshes
 from urdf2mjcf.reporting import new_report, validate_report_path, write_report
 from urdf2mjcf.urdf_inertia_calculator import URDFInertiaCalculator
 from urdf2mjcf.urdf_to_mjcf_converter import URDF2MJCFConverter, URDFConverterBase
@@ -31,6 +33,8 @@ from urdf2mjcf.urdf_validation import (
     physical_issues,
     topology_issues,
 )
+
+_MESH_FORMATS = PREPROCESS_FORMATS | {".obj", ".stl"}
 
 
 class MujocoConversionManager:
@@ -51,6 +55,7 @@ class MujocoConversionManager:
         self.last_backend: str | None = None
         self.last_report: dict | None = None
         self._staged_asset_paths: dict[Path, Path] = {}
+        self._selected_mesh_sources: set[Path] | None = None
         self.urdf_path = Path(urdf_path).expanduser().resolve()
         self.logger = URDF2MJCFLogger.get_logger("MujocoConversionManager")
         self.fixed_base = fixed_base
@@ -95,19 +100,82 @@ class MujocoConversionManager:
 
     def _resolve_asset_dir(self, name: str) -> Path:
         """Resolve an asset directory path while tolerating common capitalization variants."""
-        roots = [self.urdf_path.parent, self.urdf_path.parent / "meshes"]
-        if self.urdf_path.parent.name.lower() == "urdf":
-            roots.append(self.urdf_path.parent.parent / "meshes")
-        candidates = [
-            root / variant
-            for root in roots
-            for variant in (name, name.capitalize(), name.upper())
-        ]
-        for candidate in candidates:
-            if candidate.exists() and candidate.is_dir():
-                self.logger.debug(f"Found asset directory: '{candidate}'")
-                return candidate
-        return self.urdf_path.parent / name
+        path = find_asset_directory(self.urdf_path, name)
+        if path.is_dir():
+            self.logger.debug("Found asset directory: '%s'", path)
+        return path
+
+    def _protect_source_asset(self, source: Path) -> None:
+        """Publication must not remove an input mesh, material, texture or alias."""
+        meshes = self.output_dir / "meshes"
+        if source.is_relative_to(meshes) or source.is_relative_to(meshes.resolve()):
+            raise ValueError(
+                f"Output asset directory contains a referenced source asset: {source}"
+            )
+        if source == self.output_dir / f"{self.urdf_path.stem}.xml":
+            raise ValueError(
+                f"Output XML would replace a referenced source asset: {source}"
+            )
+
+    def _validate_source_assets(self) -> None:
+        """Protect external OBJ side files as well as the copied asset trees."""
+        resolver = MeshPathResolver(
+            self.urdf_path.parent,
+            self.meshes_dir,
+            prefer_converted=False,
+            source_map=self._staged_asset_paths,
+        )
+        originals = {
+            staged.resolve(): source
+            for source, staged in self._staged_asset_paths.items()
+        }
+        meshes = set()
+        for mesh in ET.parse(self.urdf_path).getroot().findall("link/*/geometry/mesh"):
+            try:
+                resolved = resolver.resolve(mesh.get("filename", mesh.get("file", "")))
+            except (OSError, ValueError):
+                continue  # Conversion reports unresolved inputs in its normal stage.
+            source = originals.get(resolved, resolved)
+            self._protect_source_asset(source)
+            if (
+                source.suffix.lower() == ".obj"
+                and source not in self._staged_asset_paths
+            ):
+                meshes.add(source)
+        for dependency in iter_obj_dependencies(sorted(meshes)):
+            self._protect_source_asset(dependency)
+
+    def _referenced_mesh_sources(self) -> set[Path] | None:
+        """Select original mesh files; defer unresolved legacy names to staging."""
+        sources = set()
+        robot = ET.parse(self.urdf_path).getroot()
+        for kind, directory in (
+            ("visual", self.visual_dir),
+            ("collision", self.collision_dir),
+        ):
+            resolver = MeshPathResolver(
+                self.urdf_path.parent, directory, prefer_converted=False
+            )
+            for mesh in robot.findall(f"link/{kind}/geometry/mesh"):
+                reference = mesh.get("filename", mesh.get("file", ""))
+                try:
+                    source = resolver.resolve(reference)
+                    if (
+                        source.suffix.lower() == ".obj"
+                        and source.parent.name == source.stem
+                        and any(
+                            path.is_file()
+                            and path.stem == source.stem
+                            and path.suffix.lower() in _MESH_FORMATS - {".obj"}
+                            for path in source.parent.parent.iterdir()
+                        )
+                    ):
+                        return None  # Refresh legacy generated OBJ names from their source.
+                except (OSError, ValueError):
+                    # Converted OBJ names may only exist after preprocessing.
+                    return None
+                sources.add(source)
+        return sources
 
     def _copy_tree(self, src: Path, dst: Path) -> None:
         """Recursively copy a directory while preserving relative layout."""
@@ -116,19 +184,36 @@ class MujocoConversionManager:
             return
 
         file_list = [path for path in src.rglob("*") if path.is_file()]
-        self.logger.info(f"Copying {len(file_list)} assets from '{src}' to '{dst}'...")
+        self.logger.info("Scanning %s assets in '%s'...", len(file_list), src)
+        copied = 0
 
         with tqdm(
             total=len(file_list),
-            desc=f"Copying {src.name}",
+            desc=f"Staging {src.name}",
             disable=not sys.stderr.isatty(),
         ) as progress:
             for src_path in file_list:
+                source = src_path.resolve()
+                self._protect_source_asset(src_path.absolute())
+                self._protect_source_asset(source)
+                if src_path.suffix.lower() == ".obj":
+                    for dependency in iter_obj_dependencies([src_path]):
+                        self._protect_source_asset(dependency)
+                if (
+                    src == self.visual_dir
+                    and self._selected_mesh_sources is not None
+                    and src_path.suffix.lower() in _MESH_FORMATS
+                    and source not in self._selected_mesh_sources
+                ):
+                    progress.update(1)
+                    continue
                 dst_path = dst / src_path.relative_to(src)
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dst_path)
-                self._staged_asset_paths[src_path.resolve()] = dst_path.resolve()
+                self._staged_asset_paths[source] = dst_path.resolve()
+                copied += 1
                 progress.update(1)
+        self.logger.info("Copied %s source assets from '%s'", copied, src)
 
     def _convert_urdf_with_recovery(self, urdf_converter: URDFConverterBase) -> bool:
         """Convert URDF to MJCF, retrying once after inertia recalculation when enabled."""
@@ -216,7 +301,7 @@ class MujocoConversionManager:
     def _convert_mesh_directory(self, directory: Path) -> None:
         """Convert one asset tree and stop if any required mesh failed."""
         inputs = {}
-        formats = {".obj", ".dae", ".glb", ".stl", ".ply", ".off", ".3mf"}
+        formats = _MESH_FORMATS
         for source in sorted(directory.rglob("*")):
             if not source.is_file() or source.suffix.lower() not in formats:
                 continue
@@ -360,9 +445,11 @@ class MujocoConversionManager:
         self.logger.info("Starting full conversion pipeline...")
 
         self._set_stage("copy_assets")
+        self._selected_mesh_sources = self._referenced_mesh_sources()
         self._copy_tree(self.visual_dir, self.visual_output_dir)
         if self.export_collision:
             self._copy_tree(self.collision_dir, self.collision_output_dir)
+        self._validate_source_assets()
 
         self._set_stage("mesh_conversion")
         self.logger.info("Converting DAE/GLB meshes to OBJ format...")
@@ -506,17 +593,17 @@ class MujocoConversionManager:
             )
             editor.remove_invalid_mesh_geoms()
 
-            if self.export_collision:
-                self.logger.info("Adding collision geometries...")
-                try:
-                    added_count = editor.add_collision_meshes_and_geoms(
-                        self.collision_output_dir
-                    )
-                    self.logger.info(f"Added {added_count} collision geoms.")
-                except Exception as exc:
-                    self.logger.warning(
-                        f"Failed to add collision geoms: {exc}", exc_info=True
-                    )
+        if self.export_collision:
+            self.logger.info("Adding collision geometries...")
+            try:
+                added_count = editor.add_collision_meshes_and_geoms(
+                    self.collision_output_dir
+                )
+                self.logger.info(f"Added {added_count} collision geoms.")
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to add collision geoms: {exc}", exc_info=True
+                )
 
         editor.move_geom_scales_to_meshes()
 

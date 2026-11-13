@@ -685,14 +685,28 @@ class MJCFEditor:
             if not link_mesh_name:
                 continue
             # collision_map stores stems without the collision suffix.
-            if link_mesh_name not in collision_map:
-                continue
+            if link_mesh_name in collision_map:
+                stem = link_mesh_name
+            else:
+                # Native backend mesh names are content hashes; fall back to
+                # matching the referenced mesh file stem instead.
+                mesh_file = next(
+                    (
+                        m.attrib.get("file")
+                        for m in asset_node.findall("mesh")
+                        if m.attrib.get("name") == link_mesh_name
+                    ),
+                    None,
+                )
+                stem = Path(mesh_file).stem if mesh_file else None
+                if stem not in collision_map:
+                    continue
 
             col_mesh_name = f"{link_mesh_name}{mesh_name_suffix}"
 
             # Ensure mesh asset exists only when we really need to add this collision geom.
             if col_mesh_name not in existing_mesh_names:
-                rel_file = collision_map[link_mesh_name]
+                rel_file = collision_map[stem]
                 mesh_elem = ET.Element("mesh")
                 mesh_elem.set("name", col_mesh_name)
                 mesh_elem.set("file", rel_file)

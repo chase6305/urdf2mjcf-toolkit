@@ -11,7 +11,37 @@ import numpy as np
 import pytest
 import trimesh
 
+from urdf2mjcf.obj_to_mjcf_converter import OBJ2MJCFImporter
 from urdf2mjcf.urdf_to_mujoco_converter import MujocoConversionManager
+
+
+@pytest.mark.parametrize("keep_helpers", [False, True])
+def test_external_backend_works_with_toolkit_checkout_on_pythonpath(
+    tmp_path, monkeypatch, keep_helpers
+):
+    import urdf2mjcf.urdf_to_mjcf_converter as converter_module
+
+    checkout = str(Path(converter_module.__file__).resolve().parent.parent)
+    helpers = tmp_path / "user_helpers"
+    helpers.mkdir()
+    pythonpath = os.pathsep.join([checkout, str(helpers)]) if keep_helpers else checkout
+    monkeypatch.setenv("PYTHONPATH", pythonpath)
+    monkeypatch.setenv(
+        "PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+    )
+    source = tmp_path / "robot.urdf"
+    source.write_text(
+        '<robot name="pythonpath"><link name="body"><inertial><mass value="1"/>'
+        '<inertia ixx="1" iyy="1" izz="1"/></inertial>'
+        '<visual><geometry><box size="1 1 1"/></geometry></visual></link></robot>'
+    )
+    manager = MujocoConversionManager(source, tmp_path / "output", backend="urdf2mjcf")
+
+    model = mujoco.MjModel.from_xml_path(str(manager.run()))
+
+    np.testing.assert_allclose(model.body("body").mass, [1])
+    assert manager.last_backend == "urdf2mjcf"
+    assert os.environ["PYTHONPATH"] == pythonpath
 
 
 def test_old_xml_cannot_replace_fresh_glb_geometry(tmp_path):
@@ -148,18 +178,57 @@ def _painted_obj(path):
     )
 
 
+def test_standalone_obj_failed_rerun_preserves_compilable_previous_outputs(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+    )
+    source = tmp_path / "arm.obj"
+    _painted_obj(source)
+    importer = OBJ2MJCFImporter(tmp_path)
+    assert importer.handle_dir(tmp_path)
+    output = tmp_path / "arm"
+    xml = output / "arm.xml"
+    original = {
+        path.relative_to(output): path.read_bytes()
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    compiled = mujoco.MjModel.from_xml_path(str(xml))
+    source.write_text("mtllib missing.mtl\n" + source.read_text())
+    invalid_input = source.read_bytes()
+
+    assert not importer.handle_dir(tmp_path)
+
+    assert source.read_bytes() == invalid_input
+    assert {
+        path.relative_to(output): path.read_bytes()
+        for path in output.rglob("*")
+        if path.is_file()
+    } == original
+    restored = mujoco.MjModel.from_xml_path(str(xml))
+    for field in ("mesh_vert", "mesh_face", "geom_size", "mat_rgba"):
+        np.testing.assert_array_equal(
+            getattr(restored, field), getattr(compiled, field)
+        )
+
+
+@pytest.mark.parametrize("suffix", ["obj", "OBJ", "Obj"])
 def test_explicit_urdf_color_covers_all_parts_without_recoloring_other_instances(
     tmp_path,
+    suffix,
 ):
     visual = tmp_path / "meshes/visual"
     visual.mkdir(parents=True)
-    _painted_obj(visual / "arm.obj")
+    _painted_obj(visual / f"arm.{suffix}")
+    original_assets = {path.name: path.read_bytes() for path in visual.iterdir()}
     source = tmp_path / "robot.urdf"
     source.write_text(
         '<robot name="part_colors"><material name="arm"><color rgba="0 0 1 0.6"/></material>'
         '<link name="arm"><inertial><mass value="2"/><inertia ixx="2" iyy="3" izz="4"/></inertial>'
-        '<visual><geometry><mesh filename="meshes/visual/arm.obj"/></geometry><material name="arm"/></visual>'
-        '<visual><origin xyz="2 0 0"/><geometry><mesh filename="meshes/visual/arm.obj"/></geometry></visual>'
+        f'<visual><geometry><mesh filename="meshes/visual/arm.{suffix}"/></geometry><material name="arm"/></visual>'
+        f'<visual><origin xyz="2 0 0"/><geometry><mesh filename="meshes/visual/arm.{suffix}"/></geometry></visual>'
         "</link></robot>"
     )
     manager = MujocoConversionManager(source, tmp_path / "output", backend="urdf2mjcf")
@@ -177,6 +246,9 @@ def test_explicit_urdf_color_covers_all_parts_without_recoloring_other_instances
     expected = ([0, 0, 1, 0.6], [0, 0, 1, 0.6], [1, 0, 0, 1], [0, 1, 0, 1])
     for gid, rgba in zip(visual_ids, expected, strict=True):
         np.testing.assert_allclose(colors[gid], rgba, atol=1e-7)
+    assert {
+        path.name: path.read_bytes() for path in visual.iterdir()
+    } == original_assets
 
 
 def test_native_visual_named_floor_keeps_its_geometry_and_a_distinct_ground(tmp_path):

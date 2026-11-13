@@ -5,8 +5,10 @@ import os
 import time
 from pathlib import Path
 
+from urdf2mjcf.asset_paths import find_asset_directory
 from urdf2mjcf.inspection import inspect_urdf
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.obj_assets import iter_obj_dependencies
 from urdf2mjcf.reporting import new_report, validate_report_path, write_report
 from urdf2mjcf.urdf_to_mujoco_converter import (
     MujocoConversionManager,
@@ -158,12 +160,24 @@ class BatchConversionManager:
             model_files.add(destination / f"{resolved.stem}.xml")
 
         def protect(path: Path, kind: str, source: Path) -> None:
-            if path in model_files or any(
-                parent in asset_trees for parent in path.parents
+            if (
+                path in model_files
+                or path in asset_trees
+                or any(parent in asset_trees for parent in path.parents)
             ):
                 raise ValueError(
                     f"Batch output would replace an input {kind}: {path} (used by {source})"
                 )
+
+        inspected_trees = set()
+        inspected_objs = set()
+
+        def inspect_obj(path, source):
+            key = (path.resolve(), path.parent.resolve())
+            if key not in inspected_objs:
+                inspected_objs.add(key)
+                for dependency in iter_obj_dependencies([path]):
+                    protect(dependency, "asset", source)
 
         for source, resolved in resolved_sources.items():
             protect(resolved, "URDF", source)
@@ -171,7 +185,28 @@ class BatchConversionManager:
             # are invalid. Such model errors still belong to per-job reports.
             for mesh in inspect_urdf(source, backend=self.backend)["meshes"]:
                 if mesh["resolved_path"] is not None:
-                    protect(Path(mesh["resolved_path"]), "mesh", source)
+                    path = Path(mesh["resolved_path"])
+                    protect(path, "mesh", source)
+                    if path.suffix.lower() == ".obj":
+                        inspect_obj(path, source)
+            kinds = ["visual"]
+            if self.conversion_options["export_collision"]:
+                kinds.append("collision")
+            for kind in kinds:
+                tree = find_asset_directory(resolved, kind)
+                if not tree.is_dir():
+                    continue
+                protect(tree.absolute(), "asset directory", source)
+                protect(tree.resolve(), "asset directory", source)
+                if tree.resolve() in inspected_trees:
+                    continue
+                inspected_trees.add(tree.resolve())
+                for asset in sorted(tree.rglob("*")):
+                    if asset.is_file():
+                        protect(asset.absolute(), "asset", source)
+                        protect(asset.resolve(), "asset", source)
+                        if asset.suffix.lower() == ".obj":
+                            inspect_obj(asset, source)
 
     def _run_one(self, source: Path, destination: Path) -> dict:
         started = time.perf_counter()

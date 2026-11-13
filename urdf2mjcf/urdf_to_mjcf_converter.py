@@ -4,6 +4,7 @@ Modular URDF to MuJoCo Conversion Script
 Supports both urdf2mjcf and basic conversion methods
 """
 
+import os
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -23,6 +24,33 @@ from urdf2mjcf.urdf_validation import (
     validate_urdf_physics,
     validate_urdf_structure,
 )
+
+
+def _external_environment(working_directory: Path) -> dict[str, str]:
+    """Keep toolkit checkouts from shadowing the same-named upstream package.
+
+    Only remove conflicting PYTHONPATH entries in the child environment. Other
+    user paths and the parent process retain their original values.
+    """
+    environment = os.environ.copy()
+    if "PYTHONPATH" not in environment:
+        return environment
+    retained = []
+    for entry in environment["PYTHONPATH"].split(os.pathsep):
+        try:
+            package = (working_directory / (entry or ".")).resolve() / "urdf2mjcf"
+            conflicting = (package / "urdf_to_mjcf_converter.py").is_file() and not (
+                package / "convert.py"
+            ).is_file()
+        except (OSError, RuntimeError):
+            conflicting = False
+        if not conflicting:
+            retained.append(entry)
+    if retained:
+        environment["PYTHONPATH"] = os.pathsep.join(retained)
+    else:
+        environment.pop("PYTHONPATH")
+    return environment
 
 
 class URDFConverterBase(ABC):
@@ -132,6 +160,7 @@ class URDF2MJCFConverter(URDFConverterBase):
                 result = subprocess.run(
                     cmd,
                     cwd=str(self.assets_dir),
+                    env=_external_environment(self.assets_dir),
                     capture_output=True,
                     text=True,
                 )

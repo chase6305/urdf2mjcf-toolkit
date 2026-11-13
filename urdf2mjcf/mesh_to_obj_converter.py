@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import trimesh
 
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.mesh_units import normalize_mesh_asset
 
 SUPPORTED_EXTENSIONS = frozenset({".stl", ".ply", ".off", ".3mf"})
 
@@ -47,6 +49,8 @@ class MeshToOBJConverter:
             raise TypeError(f"Unsupported trimesh result: {type(loaded)}")
         if mesh.vertices.size == 0 or mesh.faces.size == 0:
             raise ValueError("Mesh contains no triangle geometry")
+        if not np.all(np.isfinite(mesh.vertices)):
+            raise ValueError("Mesh vertices must contain finite coordinates")
         return mesh
 
     def convert_file(
@@ -72,7 +76,9 @@ class MeshToOBJConverter:
             return output_path
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        loaded = trimesh.load(source_path, process=False)
+        loaded = normalize_mesh_asset(
+            trimesh.load(source_path, process=False), source_path
+        )
         mesh = self._as_single_mesh(loaded)
         mesh.export(output_path, file_type="obj")
         self.logger.info(f"Converted {source_path} -> {output_path}")

@@ -20,6 +20,7 @@ except ImportError:
 
 from urdf2mjcf.asset_paths import MeshPathResolver
 from urdf2mjcf.logging_utils import URDF2MJCFLogger
+from urdf2mjcf.mesh_units import normalize_mesh_asset
 from urdf2mjcf.physics import (
     numbers,
     origin_transform,
@@ -93,7 +94,8 @@ class URDFInertiaCalculator:
     def _mesh_properties(self, mesh_path: Path, scale=1.0) -> dict:
         if not TRIMESH_AVAILABLE:
             raise RuntimeError("Trimesh is required for mesh inertia calculation")
-        mesh = trimesh.load(mesh_path)
+        mesh_path = Path(mesh_path)
+        mesh = normalize_mesh_asset(trimesh.load(mesh_path), mesh_path)
         if isinstance(mesh, trimesh.Scene):
             mesh = mesh.to_mesh()
         if not isinstance(mesh, trimesh.Trimesh):
@@ -126,21 +128,55 @@ class URDFInertiaCalculator:
         A uniform density cancels during mass normalization. Open/zero-volume
         meshes fail explicitly; no placeholder inertia is substituted.
         """
+        self.last_error = None
         try:
             if not np.isfinite(mass) or mass <= 0:
                 raise ValueError("Mass must be finite and positive")
             if density is not None and (not np.isfinite(density) or density <= 0):
                 raise ValueError("Density must be finite and positive")
             properties = self._mesh_properties(mesh_path, scale)
+            center = properties["center_mass"]
+            if not np.all(np.isfinite(center)):
+                raise ValueError("Mesh center of mass must contain finite values")
+            tensor = self._mass_scaled_inertia(
+                properties["inertia"], mass, properties["volume"]
+            )
+            validate_inertia_tensor(tensor)
             return {
                 "mass": mass,
-                "center_mass": properties["center_mass"],
-                "inertia": properties["inertia"] * (mass / properties["volume"]),
+                "center_mass": center,
+                "inertia": tensor,
             }
         except Exception as exc:
             self.last_error = str(exc)
             self.logger.error("Cannot calculate inertia: %s", exc)
             return None
+
+    @staticmethod
+    def _mass_scaled_inertia(tensor, mass: float, volume: float) -> np.ndarray:
+        """Multiply by mass / volume without forming an overflowing ratio.
+
+        Keep the power of two separate until the final result. This also avoids
+        losing a representable tensor when a very small ratio underflows to zero.
+        """
+        matrix = np.asarray(tensor, dtype=float)
+        if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+            raise ValueError("Inertia matrix must contain nine finite values")
+        if not np.isfinite(volume) or volume <= 0:
+            raise ValueError("Geometry volume must be finite and positive")
+        if not np.isfinite(mass) or mass <= 0:
+            raise ValueError("Mass must be finite and positive")
+        fraction, exponent = np.frexp(matrix)
+        mass_fraction, mass_exponent = np.frexp(mass)
+        volume_fraction, volume_exponent = np.frexp(volume)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            result = np.ldexp(
+                fraction * (mass_fraction / volume_fraction),
+                exponent + mass_exponent - volume_exponent,
+            )
+        if not np.all(np.isfinite(result)):
+            raise ValueError("Mass-normalized inertia must contain finite values")
+        return result
 
     @staticmethod
     def inertia_matrix_to_urdf_params(inertia_matrix: np.ndarray) -> dict[str, float]:
@@ -195,7 +231,7 @@ class URDFInertiaCalculator:
         eigvals, eigvecs = np.linalg.eigh(matrix)
 
         with np.errstate(over="ignore", invalid="ignore"):
-            relative_min = np.trace(matrix) * rel_tol
+            relative_min = np.sum(np.diag(matrix) * rel_tol)
         if not np.isfinite(relative_min):
             raise ValueError("Regularization threshold is not finite")
         min_allowed = max(abs_tol, relative_min)
@@ -371,11 +407,18 @@ class URDFInertiaCalculator:
                         self._geometry_properties(element, resolver, mesh_cache)
                         for element in geometries
                     ]
-                    volume = sum(part["volume"] for part in parts)
-                    center = (
-                        sum(part["volume"] * part["center_mass"] for part in parts)
-                        / volume
+                    volumes = np.array([part["volume"] for part in parts])
+                    if not np.all(np.isfinite(volumes)) or np.any(volumes <= 0):
+                        raise ValueError("Geometry volumes must be finite and positive")
+                    volume = float(np.sum(volumes))
+                    if not np.isfinite(volume):
+                        raise ValueError("Total geometry volume must be finite")
+                    center = sum(
+                        (part["volume"] / volume) * part["center_mass"]
+                        for part in parts
                     )
+                    if not np.all(np.isfinite(center)):
+                        raise ValueError("Center of mass must contain finite values")
                     tensor = np.zeros((3, 3))
                     for part in parts:
                         offset = part["center_mass"] - center
@@ -383,7 +426,7 @@ class URDFInertiaCalculator:
                             np.dot(offset, offset) * np.eye(3)
                             - np.outer(offset, offset)
                         )
-                    tensor *= mass / volume
+                    tensor = self._mass_scaled_inertia(tensor, mass, volume)
                     origin = inertial.find("origin")
                     rotation = origin_transform(origin)[:3, :3]
                     tensor = rotation.T @ tensor @ rotation

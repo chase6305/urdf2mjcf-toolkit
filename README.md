@@ -99,6 +99,8 @@ The native backend uses [MuJoCo's URDF importer](https://mujoco.readthedocs.io/e
 
 Both backends share mesh format conversion, base settings, ground setup, and final MuJoCo validation. Errors unrelated to inertia, such as missing executables, are reported or trigger backend fallback without recalculating inertia. Automatic recovery recalculates only invalid inertia definitions in a temporary URDF, preserving valid link masses, centers of mass, and tensors. Invalid definitions that lack usable geometry or a positive finite mass fail with a link-specific error.
 
+The external URDF command can run with a toolkit checkout on `PYTHONPATH`. Its child environment omits only toolkit paths that would shadow the upstream converter; other paths and the caller's environment are preserved.
+
 Physical correctness checks and remaining limits are recorded in the [correctness audit](docs/correctness-audit.md). Conversion preserves explicit root/link inertias and joint dynamics; unsupported mimic, planar, and internal floating joints fail explicitly. Each run stages fresh assets and restores the previous XML and assets if conversion or publication fails. Output directories must be exclusive to one conversion task.
 
 Mesh instances retain their exact source file and scale even when OBJ/STL filenames match across directories or a filename resembles a generated scale suffix. Collision meshes retain their complete geometry when the same file is also used for a visual that is split by material. Native mesh aliases are temporary; the published output contains bundled runtime files.
@@ -122,6 +124,8 @@ urdf2mjcf-toolkit robot.urdf ./output --backend auto --report ./reports/conversi
 Repeated singleton declarations such as two inertias, axes, limits, origins, or geometry elements fail with `ambiguous_definition`; the inertia calculator also refuses to rewrite such inputs. Origins must use `xyz`/`rpy`: `quat_xyzw` is currently rejected explicitly. Finite, nonzero joint axes are normalized before import regardless of magnitude. A positive effort limit clamps total joint actuator force; a zero effort limit keeps the passive degree of freedom and clamps every generated actuator's force to zero.
 
 Conversion checks XML, topology, and physical declarations before copying or converting mesh assets. Fatal declarations stop at `input_validation`; the report includes their diagnostic `issues`. With automatic inertia recovery enabled, invalid inertia definitions continue to the selective repair flow. Disabling recovery rejects them before asset work as well.
+
+Color declarations require four finite RGBA values in `[0, 1]` (`invalid_material`). Global material names must be unique (`duplicate_material`). Multiple materials in one visual, or repeated color/texture elements in a material, fail with `ambiguous_definition`. Shared inline material names remain allowed. These checks run before asset processing for every backend, and final compilation also rejects non-finite geometry/material colors.
 
 Checks do not invoke converters or create the conversion output directory. Mesh contents, textures, inferred inertias, and compiled dynamics still require conversion and MuJoCo validation; a passing check does not guarantee a successful conversion. Velocity limits produce a `velocity_limit_unenforced` warning because they require controller enforcement. Warnings alone keep the check status `passed` and exit code `0`. Conversion-only options are ignored in check mode; the requested backend is recorded as context.
 
@@ -174,7 +178,7 @@ The batch command supports the single-model backend, base, collision, inertia, c
 
 URDF file symlinks outside the selected output subtree remain inputs, even when they point into an earlier output. Conversion preflight protects those targets from replacement by any batch job; check mode can inspect the aliases without modifying them.
 
-Batch planning also checks whether any job would replace another job's input URDF or referenced mesh, including references through symlinks. Such conflicts fail discovery before any model is converted; move the shared inputs outside the affected output trees. Existing shared assets elsewhere under the output root may still be used. An unreadable input symlink is recorded as a model failure, so unrelated jobs can continue unless `--fail-fast` is set.
+Batch planning also protects input URDFs, referenced meshes, OBJ material/diffuse-texture dependencies, and copied asset-tree files from every job's XML and mesh publication, including file aliases and symlink targets. Such conflicts fail discovery before any model is converted; move the shared inputs outside the affected output trees. Existing shared assets elsewhere under the output root may still be used. An unreadable input symlink is recorded as a model failure, so unrelated jobs can continue unless `--fail-fast` is set.
 
 Python usage:
 
@@ -232,6 +236,8 @@ Recalculation preserves each link's existing mass; a uniform `--density` cancels
 
 Regularization tolerances and the optional minimum eigenvalue must be finite and nonnegative. Invalid parameters or numerical overflow abort the update before writing the URDF.
 
+Mass normalization keeps powers of two separate so an intermediate `mass / volume` cannot overflow or underflow before a representable inertia is produced. Compound centers use volume fractions, and regularization scales each diagonal before summing the relative threshold. Unrepresentable or invalid mass properties still fail explicitly. The mesh calculation API clears `last_error` on each call and returns `None` on failure.
+
 Within one inertia update, repeated references to the same mesh and effective scale reuse its unit-density mass properties. Per-instance frames and per-link masses are applied separately. Loaded triangle meshes are released after computing these properties, and the cache is discarded after the update so a later call observes edited source meshes.
 
 Validate URDF inertia values without modifying the file:
@@ -267,13 +273,21 @@ python kit/visualize_mujoco.py output/robot.xml
 
 Supported layouts include `visual/`, `meshes/visual/`, and `urdf/robot.urdf` alongside `meshes/visual/`, with equivalent collision layouts. Mesh references may use relative paths, absolute paths, `file://`, or `package://` references resolvable in the local directory hierarchy. Converted OBJ files take precedence; ambiguous filenames produce an explicit error.
 
+When source references resolve up front, main conversion stages the referenced visual mesh files and supporting files in their relative layout. Unrelated visual meshes are excluded from preprocessing and material import. Legacy converted OBJ references retain directory preprocessing when needed to refresh their source. `--export-collision` keeps complete collision-directory preprocessing and supplementation.
+
 Referenced DAE, GLB, PLY, OFF, and 3MF files outside these layouts are also converted automatically, including explicit collision references without `--export-collision`. Repeated references to the same resolved source share one conversion per run, and `auto` reuses preprocessing when switching backends. Supplemental conversions use distinct generated names for different source paths, preserving same-named files from separate directories. Existing directory processing still rejects sources that compete for the same converted filename. OBJ/STL references retain direct import and final asset collection.
+
+OBJ material processing also accepts `.OBJ` and mixed-case extensions. Temporary lowercase aliases preserve relative MTL/texture references and are removed after the external command, including on failure. Inputs with the same stem in one directory (such as `arm.obj` and `arm.OBJ`) fail before conversion because they would overwrite the same generated model.
+
+The standalone OBJ step rejects input OBJ/MTL/diffuse-texture files inside any model directory it would replace, including file-symlink targets. Failed commands, missing/stale models, or invalid generated mesh references restore the previous directories. If filesystem rollback fails, remaining backups and a recovery manifest stay in the reported `.obj2mjcf-backup-*` directory. That prefix is reserved and excluded from OBJ scans. Use one converter per asset directory at a time.
 
 A required mesh conversion failure makes the main command exit with a nonzero status. Intermediate XML and staged URDF files are cleaned up automatically. Conversion, asset-copy, validation, or publication failures preserve the previous output XML and assets. Reruns refresh source meshes and skip subtrees already generated by `obj2mjcf`.
 
-The output `meshes/` directory must not contain the input URDF or a referenced source mesh: conversion rejects that overlap to prevent publication from replacing input files. This also applies to input paths resolved through symlinks. Choose a separate output directory in that case.
+The output `meshes/` directory must not contain the input URDF, a referenced mesh, an OBJ material/diffuse-texture dependency, or any file copied from the source asset trees. The final XML path must also differ from these inputs; conversion rejects overlaps before mesh processing. This also applies to input paths resolved through symlinks. Choose a separate output directory in that case.
 
 DAE conversion falls back to trimesh/pycollada when Blender is unavailable or its Collada importer fails. Scene transforms are applied before meshes are merged.
+
+DAE fallback applies the document's `unit meter` and `up_axis`, producing meter-based Z-up geometry. 3MF declared units, including the default millimeter, are converted to meters. Node translations are normalized together with vertices; URDF mesh scale and geometry origins are applied afterward. Direct mesh inertia calculation and automatic recovery use these same unit/frame conventions. Invalid unit declarations fail explicitly.
 
 GLB conversion merges compatible material instances and retains distinct material groups in the same OBJ. `--no-merge` preserves every geometry group. Named materials, solid diffuse colors, and each material's base-color texture keep separate bindings; extracted image names are generated locally rather than used as paths. Explicit MJCF colors and texture bindings take precedence over filename-based texture discovery. This does not reproduce the complete glTF PBR shading model.
 
