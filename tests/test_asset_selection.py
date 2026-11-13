@@ -145,5 +145,12 @@ def test_collision_supplementation_keeps_unreferenced_collision_files(
     model = mujoco.MjModel.from_xml_path(str(manager.run()))
 
     assert model.ngeom == 3
-    assert model.nmesh == 2
+    colliders = [
+        gid
+        for gid in range(model.ngeom)
+        if model.geom_bodyid[gid] == model.body("arm").id
+        and model.geom_contype[gid] != 0
+        and model.geom_conaffinity[gid] != 0
+    ]
+    assert len(colliders) == 1
     assert (manager.collision_output_dir / "arm.obj").is_file()

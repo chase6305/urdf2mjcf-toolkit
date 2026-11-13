@@ -593,17 +593,17 @@ class MujocoConversionManager:
             )
             editor.remove_invalid_mesh_geoms()
 
-            if self.export_collision:
-                self.logger.info("Adding collision geometries...")
-                try:
-                    added_count = editor.add_collision_meshes_and_geoms(
-                        self.collision_output_dir
-                    )
-                    self.logger.info(f"Added {added_count} collision geoms.")
-                except Exception as exc:
-                    self.logger.warning(
-                        f"Failed to add collision geoms: {exc}", exc_info=True
-                    )
+        if self.export_collision:
+            self.logger.info("Adding collision geometries...")
+            try:
+                added_count = editor.add_collision_meshes_and_geoms(
+                    self.collision_output_dir
+                )
+                self.logger.info(f"Added {added_count} collision geoms.")
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to add collision geoms: {exc}", exc_info=True
+                )
 
         editor.move_geom_scales_to_meshes()
 
